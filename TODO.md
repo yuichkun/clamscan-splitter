@@ -136,17 +136,17 @@
   **Acceptance**: No infinite loops, quarantine works correctly
 
 ### 2.5 State Module
-- [ ] Write `tests/test_state.py`:
-  - [ ] Test atomic write operations
-  - [ ] Test state loading/saving
-  - [ ] Test corruption recovery
-  - [ ] Test concurrent access (file locking)
+- [x] Write `tests/test_state.py`:
+  - [x] Test atomic write operations
+  - [x] Test state loading/saving
+  - [x] Test corruption recovery
+  - [x] Test concurrent access (file locking)
 
-- [ ] Implement `src/clamscan_splitter/state.py`:
-  - [ ] `ScanState` dataclass
-  - [ ] `StateManager.save_state()` with atomic writes
-  - [ ] `StateManager.load_state()` with validation
-  - [ ] Progress tracking
+- [x] Implement `src/clamscan_splitter/state.py`:
+  - [x] `ScanState` dataclass
+  - [x] `StateManager.save_state()` with atomic writes
+  - [x] `StateManager.load_state()` with validation
+  - [x] Progress tracking
 
   **Acceptance**: State survives process crashes, no corruption
 
