@@ -183,11 +183,11 @@
 ## Phase 3: Integration
 
 ### 3.1 End-to-End Tests
-- [ ] Write `tests/test_integration.py`:
-  - [ ] Test complete scan workflow (mocked)
-  - [ ] Test resume after interruption
-  - [ ] Test handling of mixed success/failure
-  - [ ] Test quarantine workflow
+- [x] Write `tests/test_integration.py`:
+  - [x] Test complete scan workflow (mocked)
+  - [x] Test resume after interruption
+  - [x] Test handling of mixed success/failure
+  - [x] Test quarantine workflow
 
   **Guidance**: Use all mocks together to simulate full scan
 
