@@ -105,17 +105,17 @@
   **Acceptance**: Chunks never exceed limits, special files filtered
 
 ### 2.3 Monitor Module
-- [ ] Write `tests/test_monitor.py`:
-  - [ ] Test CPU monitoring (mock psutil)
-  - [ ] Test hang detection logic
-  - [ ] Test process killing (mock process tree)
-  - [ ] Test memory monitoring
+- [x] Write `tests/test_monitor.py`:
+  - [x] Test CPU monitoring (mock psutil)
+  - [x] Test hang detection logic
+  - [x] Test process killing (mock process tree)
+  - [x] Test memory monitoring
 
-- [ ] Implement `src/clamscan_splitter/monitor.py`:
-  - [ ] `ProcessMonitor` class
-  - [ ] `HangDetector.is_process_hung()`
-  - [ ] Memory-aware worker calculation
-  - [ ] Process tree killing
+- [x] Implement `src/clamscan_splitter/monitor.py`:
+  - [x] `ProcessMonitor` class
+  - [x] `HangDetector.is_process_hung()`
+  - [x] Memory-aware worker calculation
+  - [x] Process tree killing
 
   **Acceptance**: Correctly identifies hung processes without false positives
 
