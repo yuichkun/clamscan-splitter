@@ -133,7 +133,9 @@ class TestRetryManager:
         mock_result.status = "success"
         mock_scanner.scan_chunk.return_value = mock_result
         
-        result = await manager.scan_with_retry(chunk, mock_scanner, config)
+        from clamscan_splitter.scanner import ScanConfig
+        scan_config = ScanConfig()
+        result = await manager.scan_with_retry(chunk, mock_scanner, config, scan_config)
         
         assert result.status == "success"
         assert mock_scanner.scan_chunk.call_count == 1
@@ -167,7 +169,9 @@ class TestRetryManager:
         
         mock_scanner.scan_chunk.side_effect = scan_side_effect
         
-        result = await manager.scan_with_retry(chunk, mock_scanner, config)
+        from clamscan_splitter.scanner import ScanConfig
+        scan_config = ScanConfig()
+        result = await manager.scan_with_retry(chunk, mock_scanner, config, scan_config)
         
         assert result.status == "success"
         assert call_count[0] == 2
@@ -191,7 +195,9 @@ class TestRetryManager:
         mock_scanner = AsyncMock()
         mock_scanner.scan_chunk.side_effect = ScanTimeoutError("Timeout")
         
-        result = await manager.scan_with_retry(chunk, mock_scanner, config)
+        from clamscan_splitter.scanner import ScanConfig
+        scan_config = ScanConfig()
+        result = await manager.scan_with_retry(chunk, mock_scanner, config, scan_config)
         
         # Should return a result indicating failure/quarantine
         assert result is not None

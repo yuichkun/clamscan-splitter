@@ -234,6 +234,7 @@ class ScanOrchestrator:
                 chunk,
                 self.worker,
                 retry_config,
+                self.config,
             )
             return result
         except Exception as e:

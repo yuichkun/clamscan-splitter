@@ -48,7 +48,8 @@ class RetryManager:
         self,
         chunk: ScanChunk,
         scanner,
-        config: RetryConfig,
+        retry_config: RetryConfig,
+        scan_config,
     ) -> ScanResult:
         """
         Scan with exponential backoff retry and quarantine.
@@ -56,20 +57,21 @@ class RetryManager:
         Args:
             chunk: ScanChunk to scan
             scanner: Scanner instance with scan_chunk method
-            config: Retry configuration
+            retry_config: Retry configuration
+            scan_config: Scan configuration (ScanConfig) to pass to scanner
 
         Returns:
             ScanResult (may be partial with quarantined files noted)
         """
-        for attempt in range(config.max_attempts):
+        for attempt in range(retry_config.max_attempts):
             try:
                 # Check if any files in chunk exceed retry limit
-                files_to_skip = self._get_files_to_skip(chunk, config)
+                files_to_skip = self._get_files_to_skip(chunk, retry_config)
                 if files_to_skip:
                     chunk = self._exclude_files_from_chunk(chunk, files_to_skip)
                     self.quarantine_list.extend(files_to_skip)
 
-                result = await scanner.scan_chunk(chunk, config)
+                result = await scanner.scan_chunk(chunk, scan_config)
                 return result
 
             except Exception as e:
@@ -84,16 +86,16 @@ class RetryManager:
                     # Track which files might be problematic
                     self._update_file_retry_counts(chunk)
 
-                    if attempt == config.max_attempts - 1:
+                    if attempt == retry_config.max_attempts - 1:
                         # Final attempt failed - quarantine and report
                         return self._create_quarantine_result(chunk, e)
 
                     # Calculate backoff delay
-                    delay = self.calculate_backoff(attempt, config)
+                    delay = self.calculate_backoff(attempt, retry_config)
                     await asyncio.sleep(delay)
 
                     # Split chunk for next attempt
-                    if config.split_on_retry and len(chunk.paths) > 1:
+                    if retry_config.split_on_retry and len(chunk.paths) > 1:
                         split_chunks = self.split_chunk(chunk, 2 ** (attempt + 1))
                         if split_chunks:
                             # Use first split chunk for next attempt

@@ -83,6 +83,10 @@ class ClamAVOutputParser:
         # Parse summary section
         summary_data = self._parse_summary(stdout)
         
+        # If no summary (e.g., --no-summary flag), count from file-by-file output
+        if not summary_data.get('scanned_files') and not summary_data.get('scanned_directories'):
+            summary_data.update(self._count_from_output(lines))
+        
         # Create result object
         result = ScanResult(
             status=status,
@@ -103,12 +107,15 @@ class ClamAVOutputParser:
     def _determine_status(self, return_code: int, stdout: str) -> str:
         """Determine scan status from return code and output."""
         has_summary = PATTERNS['summary_start'].search(stdout) is not None
+        has_output = bool(stdout.strip())
         
         if return_code == 0:
-            return "success" if has_summary else "partial"
+            # Success: return code 0 means no errors
+            # If we have output (even without summary), consider it successful
+            return "success" if (has_summary or has_output) else "partial"
         elif return_code == 1:
-            # ClamAV returns 1 when infections are found
-            return "success" if has_summary else "partial"
+            # ClamAV returns 1 when infections are found (still successful scan)
+            return "success" if (has_summary or has_output) else "partial"
         elif return_code == 130:
             # SIGINT (interrupted)
             return "partial"
@@ -143,6 +150,53 @@ class ClamAVOutputParser:
                 )
         
         return infected_files
+
+    def _count_from_output(self, lines: List[str]) -> dict:
+        """
+        Count files and directories from file-by-file output when summary is missing.
+        
+        Args:
+            lines: Output lines from clamscan
+            
+        Returns:
+            Dictionary with counted statistics
+        """
+        file_count = 0
+        dir_count = 0
+        seen_paths = set()
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Skip summary lines
+            if 'SCAN SUMMARY' in line or 'Known viruses' in line:
+                continue
+            
+            # Pattern: "/path/to/file: OK" or "/path/to/file: VirusName FOUND"
+            # Pattern: "/path/to/dir: Symbolic link" or other status
+            if ':' in line:
+                path_part = line.split(':', 1)[0].strip()
+                
+                # Skip if we've seen this path (deduplicate)
+                if path_part in seen_paths:
+                    continue
+                seen_paths.add(path_part)
+                
+                # Try to determine if it's a file or directory
+                # Files typically end with extensions or are explicitly marked
+                # Directories might be marked as "Symbolic link" or similar
+                if 'Symbolic link' in line or 'Directory' in line:
+                    dir_count += 1
+                elif 'OK' in line or 'FOUND' in line or 'Empty file' in line or 'ERROR' in line:
+                    # Most lines with OK/FOUND are files
+                    file_count += 1
+        
+        return {
+            'scanned_files': file_count,
+            'scanned_directories': dir_count,
+        }
 
     def _parse_summary(self, summary_text: str) -> dict:
         """
