@@ -88,19 +88,19 @@
   **Acceptance**: All parser tests pass with 100% coverage
 
 ### 2.2 Chunker Module
-- [ ] Write `tests/test_chunker.py`:
-  - [ ] Test chunk size limits (10-20GB)
-  - [ ] Test file count limits (30K files)
-  - [ ] Test directory boundary respect
-  - [ ] Test large file isolation
-  - [ ] Test special file filtering
-  - [ ] Test mount point detection
+- [x] Write `tests/test_chunker.py`:
+  - [x] Test chunk size limits (10-20GB)
+  - [x] Test file count limits (30K files)
+  - [x] Test directory boundary respect
+  - [x] Test large file isolation
+  - [x] Test special file filtering
+  - [x] Test mount point detection
 
-- [ ] Implement `src/clamscan_splitter/chunker.py`:
-  - [ ] `ScanChunk` dataclass
-  - [ ] `FileSystemAnalyzer.analyze_directory()`
-  - [ ] `FileSystemAnalyzer.identify_problematic_files()`
-  - [ ] `ChunkCreator.create_chunks()`
+- [x] Implement `src/clamscan_splitter/chunker.py`:
+  - [x] `ScanChunk` dataclass
+  - [x] `FileSystemAnalyzer.analyze_directory()`
+  - [x] `FileSystemAnalyzer.identify_problematic_files()`
+  - [x] `ChunkCreator.create_chunks()`
 
   **Acceptance**: Chunks never exceed limits, special files filtered
 
