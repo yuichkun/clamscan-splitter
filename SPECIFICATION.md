@@ -113,16 +113,54 @@ class FileSystemAnalyzer:
 
     def identify_problematic_files(self, path: str) -> List[ProblematicFile]:
         """
-        Identify files likely to cause hangs:
+        Identify files likely to cause hangs or issues:
         - Files > 1GB
         - Archive files (*.zip, *.tar.gz, *.7z)
         - PDF files > 50MB
         - ISO/IMG files
+        - Special files (FIFOs, sockets, device files)
+        - Files on different filesystems (if cross_filesystems=False)
 
         Returns:
             List of ProblematicFile objects with path and reason
         """
-        pass
+        problematic = []
+
+        for root, dirs, files in os.walk(path):
+            # Check for mount points and skip if needed
+            if not self.config.cross_filesystems:
+                dirs[:] = [d for d in dirs if not os.path.ismount(os.path.join(root, d))]
+
+            for file in files:
+                filepath = os.path.join(root, file)
+
+                try:
+                    stat = os.stat(filepath, follow_symlinks=False)
+
+                    # Skip special files
+                    if stat.S_ISFIFO(stat.st_mode):
+                        problematic.append(ProblematicFile(filepath, "FIFO"))
+                        continue
+                    if stat.S_ISSOCK(stat.st_mode):
+                        problematic.append(ProblematicFile(filepath, "Socket"))
+                        continue
+                    if stat.S_ISBLK(stat.st_mode) or stat.S_ISCHR(stat.st_mode):
+                        problematic.append(ProblematicFile(filepath, "Device"))
+                        continue
+
+                    # Check file size
+                    if stat.st_size > 1024**3:  # 1GB
+                        problematic.append(ProblematicFile(filepath, f"Large file: {stat.st_size / 1024**3:.1f}GB"))
+
+                    # Check problematic extensions
+                    ext = os.path.splitext(filepath)[1].lower()
+                    if ext in ['.iso', '.img', '.vmdk', '.vdi']:
+                        problematic.append(ProblematicFile(filepath, f"Disk image: {ext}"))
+
+                except (OSError, PermissionError):
+                    problematic.append(ProblematicFile(filepath, "Permission denied"))
+
+        return problematic
 
 class ChunkCreator:
     """Creates optimal chunks from filesystem analysis"""
@@ -150,6 +188,7 @@ class ChunkCreator:
             - Very deep nesting (>10 levels)
             - Directories with 100k+ files
             - Sparse directories (few files, deep nesting)
+            - Single files larger than chunk size (isolate with extended timeout)
 
         Returns:
             List of ScanChunk objects ready for scanning
@@ -181,12 +220,14 @@ Manages the parallel execution of ClamAV scans on chunks with process monitoring
 @dataclass
 class ScanConfig:
     """Configuration for scanning behavior"""
-    max_concurrent_processes: int = cpu_count() - 1
+    max_concurrent_processes: int = None  # Auto-calculated based on memory
     base_timeout_per_gb: int = 30  # seconds
     min_timeout_seconds: int = 300  # 5 minutes
     max_timeout_seconds: int = 3600  # 1 hour
     clamscan_path: str = "clamscan"
     clamscan_options: List[str] = field(default_factory=lambda: ["-r", "--no-summary"])
+    memory_per_process_gb: float = 2.0  # Expected memory per clamscan
+    min_free_memory_gb: float = 2.0  # Keep this much memory free
 
 class ScanWorker:
     """Executes a single scan with monitoring"""
@@ -256,9 +297,31 @@ class ScanOrchestrator:
 
     def __init__(self, config: ScanConfig):
         self.config = config
-        self.semaphore = asyncio.Semaphore(config.max_concurrent_processes)
+        self.max_workers = self._calculate_max_workers()
+        self.semaphore = asyncio.Semaphore(self.max_workers)
         self.results = []
         self.failed_chunks = []
+        self.quarantined_files = []
+
+    def _calculate_max_workers(self) -> int:
+        """
+        Calculate maximum workers based on available memory.
+
+        Formula:
+            available_memory = total_memory - used_memory - min_free_memory
+            max_by_memory = available_memory / memory_per_process
+            max_by_cpu = cpu_count() - 1
+            return min(max_by_memory, max_by_cpu, configured_limit)
+        """
+        import psutil
+        mem = psutil.virtual_memory()
+        available_gb = (mem.available / (1024**3)) - self.config.min_free_memory_gb
+        max_by_memory = int(available_gb / self.config.memory_per_process_gb)
+        max_by_cpu = psutil.cpu_count() - 1
+
+        if self.config.max_concurrent_processes:
+            return min(max_by_memory, max_by_cpu, self.config.max_concurrent_processes)
+        return max(1, min(max_by_memory, max_by_cpu))
 
     async def scan_all(self, chunks: List[ScanChunk]) -> List[ScanResult]:
         """
@@ -404,31 +467,64 @@ Implements intelligent retry logic for failed scans with exponential backoff and
 class RetryConfig:
     """Configuration for retry behavior"""
     max_attempts: int = 3
+    max_attempts_per_file: int = 2  # Per-file retry limit
     base_delay_seconds: float = 1.0
     max_delay_seconds: float = 300.0  # 5 minutes
     exponential_base: float = 2.0
     jitter_factor: float = 0.1  # Add 0-10% random jitter
     split_on_retry: bool = True  # Split chunk into smaller pieces on retry
+    quarantine_on_final_failure: bool = True  # Add to quarantine list
 
 class RetryManager:
     """Manages retry logic for failed scans"""
+
+    def __init__(self):
+        self.file_retry_counts = defaultdict(int)  # Track per-file retries
+        self.quarantine_list = []  # Files that consistently fail
 
     async def scan_with_retry(self,
                              chunk: ScanChunk,
                              scanner: ScanWorker,
                              config: RetryConfig) -> ScanResult:
         """
-        Scan with exponential backoff retry.
+        Scan with exponential backoff retry and quarantine.
 
         Retry strategy:
         1. First attempt: scan normally
         2. Second attempt: wait 1-2 seconds, split chunk in half
         3. Third attempt: wait 4-8 seconds, split chunk into quarters
-        4. Final attempt: wait 16-32 seconds, skip problematic files
+        4. Final: Add problematic files to quarantine, scan rest
 
         Returns:
-            ScanResult (may be partial if some files skipped)
+            ScanResult (may be partial with quarantined files noted)
         """
+        for attempt in range(config.max_attempts):
+            try:
+                # Check if any files in chunk exceed retry limit
+                files_to_skip = self._get_files_to_skip(chunk, config)
+                if files_to_skip:
+                    chunk = self._exclude_files_from_chunk(chunk, files_to_skip)
+                    self.quarantine_list.extend(files_to_skip)
+
+                result = await scanner.scan_chunk(chunk, config)
+                return result
+
+            except (ScanTimeoutError, ScanHangError) as e:
+                # Track which files might be problematic
+                self._update_file_retry_counts(chunk)
+
+                if attempt == config.max_attempts - 1:
+                    # Final attempt failed - quarantine and report
+                    return self._create_quarantine_result(chunk, e)
+
+                # Calculate backoff delay
+                delay = self.calculate_backoff(attempt, config)
+                await asyncio.sleep(delay)
+
+                # Split chunk for next attempt
+                if config.split_on_retry:
+                    chunk = self._split_problematic_chunk(chunk, 2 ** attempt)
+
         pass
 
     def calculate_backoff(self, attempt: int, config: RetryConfig) -> float:
@@ -619,7 +715,18 @@ class MergedReport:
     chunks_failed: int
     chunks_partial: int
     skipped_paths: List[str]
+    quarantined_files: List[QuarantineEntry]  # Files that couldn't be scanned
     scan_date: datetime
+    scan_complete: bool  # False if any files were skipped/quarantined
+
+@dataclass
+class QuarantineEntry:
+    """Record of a file that couldn't be scanned"""
+    file_path: str
+    reason: str  # "timeout", "hang", "permission", "special_file"
+    file_size_bytes: Optional[int]
+    retry_count: int
+    last_attempt: datetime
 
 class ResultMerger:
     """Merges multiple scan results into unified report"""
@@ -656,7 +763,7 @@ class ResultMerger:
 
     def format_report(self, report: MergedReport) -> str:
         """
-        Format report in required corporate format.
+        Format report in required corporate format with quarantine info.
 
         Format:
         ```
@@ -672,6 +779,17 @@ class ResultMerger:
         Time: {seconds} sec ({minutes} m {seconds} s)
         Start Date: {timestamp}
         End Date:   {timestamp}
+
+        ----------- QUARANTINE SUMMARY -----------
+        Files that could not be scanned: {count}
+        Reasons:
+          - Timeout: {count}
+          - Permission denied: {count}
+          - Special files: {count}
+          - Other: {count}
+
+        IMPORTANT: {count} files were not scanned. Manual review required.
+        Full quarantine list saved to: quarantine_report.json
         ```
         """
         pass
@@ -714,10 +832,40 @@ class StateManager:
 
     def save_state(self, state: ScanState):
         """
-        Save state to JSON file.
-        File path: {state_dir}/{scan_id}.json
+        Save state to JSON file with atomic write.
+
+        Atomic write process:
+        1. Serialize state to JSON
+        2. Write to temp file in same directory
+        3. fsync to ensure disk write
+        4. Atomic rename to final location
+
+        This prevents corruption if process crashes mid-write.
         """
-        pass
+        import json
+        import tempfile
+
+        state_file = self.state_dir / f"{state.scan_id}.json"
+        temp_fd, temp_path = tempfile.mkstemp(
+            dir=self.state_dir,
+            prefix=f".{state.scan_id}.",
+            suffix=".tmp"
+        )
+
+        try:
+            # Write to temp file
+            with os.fdopen(temp_fd, 'w') as f:
+                json.dump(asdict(state), f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())  # Force write to disk
+
+            # Atomic rename
+            os.replace(temp_path, state_file)
+        except Exception:
+            # Clean up temp file on error
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
 
     def load_state(self, scan_id: str) -> Optional[ScanState]:
         """
