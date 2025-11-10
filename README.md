@@ -30,8 +30,11 @@ cd clamscan-splitter
 uv venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependencies
+# Install the package (this installs the 'clamscan-splitter' CLI command)
 uv pip install -e .
+
+# Verify installation
+clamscan-splitter --help
 
 # Install test dependencies (optional)
 uv pip install -e ".[test]"
@@ -40,12 +43,17 @@ uv pip install -e ".[test]"
 ### Using `uv` (Recommended)
 
 ```bash
-# Install with uv
+# Install with uv (installs the CLI command)
 uv pip install -e .
+
+# Verify the CLI is available
+clamscan-splitter --help
 
 # Run tests
 uv run pytest tests/ -v
 ```
+
+**Note**: After installation, the `clamscan-splitter` command will be available in your PATH. If you're using a virtual environment, make sure it's activated.
 
 ## Quick Start
 
