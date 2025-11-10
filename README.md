@@ -78,7 +78,7 @@ clamscan-splitter --help
 ### Basic Usage
 
 ```bash
-# Scan a directory
+# Scan a directory recursively (default behavior)
 clamscan-splitter scan /path/to/directory
 
 # Dry run to see how it will be chunked
@@ -96,6 +96,8 @@ clamscan-splitter scan /path/to/directory -o report.txt
 # JSON output
 clamscan-splitter scan /path/to/directory --json
 ```
+
+**Note**: The tool always scans directories recursively (equivalent to `clamscan -r`). It analyzes the entire directory tree and splits it into chunks for parallel processing.
 
 ### Resume Interrupted Scan
 
