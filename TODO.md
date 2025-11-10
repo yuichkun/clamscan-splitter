@@ -120,18 +120,18 @@
   **Acceptance**: Correctly identifies hung processes without false positives
 
 ### 2.4 Retry Module
-- [ ] Write `tests/test_retry.py`:
-  - [ ] Test exponential backoff timing
-  - [ ] Test retry limit enforcement
-  - [ ] Test chunk splitting on retry
-  - [ ] Test quarantine list management
-  - [ ] Test per-file retry tracking
+- [x] Write `tests/test_retry.py`:
+  - [x] Test exponential backoff timing
+  - [x] Test retry limit enforcement
+  - [x] Test chunk splitting on retry
+  - [x] Test quarantine list management
+  - [x] Test per-file retry tracking
 
-- [ ] Implement `src/clamscan_splitter/retry.py`:
-  - [ ] `RetryManager` class
-  - [ ] `scan_with_retry()` with bounded attempts
-  - [ ] Quarantine list management
-  - [ ] Exponential backoff calculation
+- [x] Implement `src/clamscan_splitter/retry.py`:
+  - [x] `RetryManager` class
+  - [x] `scan_with_retry()` with bounded attempts
+  - [x] Quarantine list management
+  - [x] Exponential backoff calculation
 
   **Acceptance**: No infinite loops, quarantine works correctly
 
