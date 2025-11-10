@@ -11,7 +11,7 @@
 ## Phase 0: Project Setup
 
 ### 0.1 Initial Structure
-- [ ] Create project structure:
+- [x] Create project structure:
   ```
   clamscan-splitter/
   ├── pyproject.toml
@@ -34,56 +34,56 @@
   ```
 
 ### 0.2 Dependencies
-- [ ] Create `pyproject.toml` with all dependencies:
+- [x] Create `pyproject.toml` with all dependencies:
   - Core: `click`, `psutil`, `rich`, `pyyaml`, `aiofiles`
   - Testing: `pytest`, `pytest-asyncio`, `pytest-subprocess`, `pyfakefs`, `pytest-cov`
-- [ ] Set up Python 3.11+ requirement
-- [ ] Configure pytest settings in pyproject.toml
+- [x] Set up Python 3.11+ requirement
+- [x] Configure pytest settings in pyproject.toml
 
 ## Phase 1: Test Infrastructure (CRITICAL - Do This First!)
 
 ### 1.1 Mock ClamAV Outputs
-- [ ] Create `tests/fixtures/mock_outputs.py` with:
-  - [ ] Clean scan output (no infections)
-  - [ ] Infected scan output (with virus detections)
-  - [ ] Partial scan output (interrupted)
-  - [ ] Error scan output (permission denied, etc.)
-  - [ ] Various SCAN SUMMARY formats
+- [x] Create `tests/fixtures/mock_outputs.py` with:
+  - [x] Clean scan output (no infections)
+  - [x] Infected scan output (with virus detections)
+  - [x] Partial scan output (interrupted)
+  - [x] Error scan output (permission denied, etc.)
+  - [x] Various SCAN SUMMARY formats
 
   **Guidance**: Use the exact format from SPECIFICATION.md section 3.4
 
 ### 1.2 Filesystem Mocking
-- [ ] Create `tests/fixtures/mock_filesystem.py`:
-  - [ ] Function to create fake directory structures
-  - [ ] Function to create files with specific sizes
-  - [ ] Function to create special files (FIFOs, sockets)
-  - [ ] Function to create deeply nested directories
+- [x] Create `tests/fixtures/mock_filesystem.py`:
+  - [x] Function to create fake directory structures
+  - [x] Function to create files with specific sizes
+  - [x] Function to create special files (FIFOs, sockets)
+  - [x] Function to create deeply nested directories
 
   **Guidance**: Use `pyfakefs` for filesystem mocking
 
 ### 1.3 Subprocess Mocking
-- [ ] Create `tests/conftest.py` with pytest fixtures:
-  - [ ] `mock_clamscan` fixture that returns different outputs
-  - [ ] `mock_hanging_process` fixture that simulates hangs
-  - [ ] `mock_psutil` fixture for process monitoring
+- [x] Create `tests/conftest.py` with pytest fixtures:
+  - [x] `mock_clamscan` fixture that returns different outputs
+  - [x] `mock_hanging_process` fixture that simulates hangs
+  - [x] `mock_psutil` fixture for process monitoring
 
   **Guidance**: Use `pytest-subprocess` for subprocess mocking
 
 ## Phase 2: Core Modules (Test-First Implementation)
 
 ### 2.1 Parser Module (Start Here - Simplest)
-- [ ] Write `tests/test_parser.py`:
-  - [ ] Test parsing clean output
-  - [ ] Test parsing infected output
-  - [ ] Test parsing malformed output
-  - [ ] Test extracting statistics
-  - [ ] Test error handling
+- [x] Write `tests/test_parser.py`:
+  - [x] Test parsing clean output
+  - [x] Test parsing infected output
+  - [x] Test parsing malformed output
+  - [x] Test extracting statistics
+  - [x] Test error handling
 
-- [ ] Implement `src/clamscan_splitter/parser.py`:
-  - [ ] `ScanResult` dataclass
-  - [ ] `InfectedFile` dataclass
-  - [ ] `ClamAVOutputParser.parse_output()` method
-  - [ ] Regex patterns for all fields
+- [x] Implement `src/clamscan_splitter/parser.py`:
+  - [x] `ScanResult` dataclass
+  - [x] `InfectedFile` dataclass
+  - [x] `ClamAVOutputParser.parse_output()` method
+  - [x] Regex patterns for all fields
 
   **Acceptance**: All parser tests pass with 100% coverage
 
