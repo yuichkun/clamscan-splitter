@@ -19,41 +19,59 @@ A high-performance Python tool for scanning large directories (1M+ files) with C
 - Python 3.11 or higher
 - ClamAV installed and configured (`clamscan` command available)
 
-### Install from Source
+### Global Installation (Recommended for CLI Usage)
+
+Install the tool globally so you can use `clamscan-splitter` from anywhere:
 
 ```bash
 # Clone the repository
 git clone <repository-url>
 cd clamscan-splitter
 
-# Create virtual environment
-uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+# Install globally (no venv needed)
+uv pip install --system -e .
 
-# Install the package (this installs the 'clamscan-splitter' CLI command)
-uv pip install -e .
+# Or using pip directly
+pip install -e .
 
 # Verify installation
 clamscan-splitter --help
-
-# Install test dependencies (optional)
-uv pip install -e ".[test]"
 ```
 
-### Using `uv` (Recommended)
+**Note**: Using `--system` flag with `uv` or regular `pip install` installs the CLI globally. You may need `sudo` on Linux/macOS if installing to system Python.
+
+### Development Installation (For Contributors)
+
+If you're developing or contributing to the project:
 
 ```bash
-# Install with uv (installs the CLI command)
+# Clone the repository
+git clone <repository-url>
+cd clamscan-splitter
+
+# Create virtual environment for development
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install in editable mode
 uv pip install -e .
 
-# Verify the CLI is available
-clamscan-splitter --help
+# Install test dependencies
+uv pip install -e ".[test]"
 
-# Run tests
-uv run pytest tests/ -v
+# Verify installation
+clamscan-splitter --help
 ```
 
-**Note**: After installation, the `clamscan-splitter` command will be available in your PATH. If you're using a virtual environment, make sure it's activated.
+### Alternative: Install from PyPI (When Available)
+
+```bash
+# Once published to PyPI
+pip install clamscan-splitter
+
+# Verify installation
+clamscan-splitter --help
+```
 
 ## Quick Start
 
