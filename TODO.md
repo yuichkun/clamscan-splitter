@@ -192,26 +192,26 @@
   **Guidance**: Use all mocks together to simulate full scan
 
 ### 3.2 CLI Module
-- [ ] Write `tests/test_cli.py`:
-  - [ ] Test all CLI commands
-  - [ ] Test parameter validation
-  - [ ] Test output formatting
+- [x] Write `tests/test_cli.py`:
+  - [x] Test all CLI commands
+  - [x] Test parameter validation
+  - [x] Test output formatting
 
-- [ ] Implement `src/clamscan_splitter/cli.py`:
-  - [ ] `scan` command with all options
-  - [ ] `list` command for incomplete scans
-  - [ ] `status` command for scan progress
-  - [ ] Progress display with Rich
+- [x] Implement `src/clamscan_splitter/cli.py`:
+  - [x] `scan` command with all options
+  - [x] `list` command for incomplete scans
+  - [x] `status` command for scan progress
+  - [x] Progress display with Rich
 
   **Acceptance**: CLI works with all options, clear output
 
 ## Phase 4: Configuration
 
 ### 4.1 Configuration Loading
-- [ ] Create default `config.yml` template
-- [ ] Add configuration loading to CLI
-- [ ] Add environment variable overrides
-- [ ] Test configuration validation
+- [x] Create default `config.yml` template
+- [x] Add configuration loading to CLI
+- [x] Add environment variable overrides
+- [x] Test configuration validation
 
 ## Phase 5: Documentation
 
