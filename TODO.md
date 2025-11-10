@@ -166,17 +166,17 @@
   **Acceptance**: Respects memory limits, handles timeouts correctly
 
 ### 2.7 Merger Module
-- [ ] Write `tests/test_merger.py`:
-  - [ ] Test result deduplication
-  - [ ] Test statistics aggregation
-  - [ ] Test quarantine reporting
-  - [ ] Test report formatting
+- [x] Write `tests/test_merger.py`:
+  - [x] Test result deduplication
+  - [x] Test statistics aggregation
+  - [x] Test quarantine reporting
+  - [x] Test report formatting
 
-- [ ] Implement `src/clamscan_splitter/merger.py`:
-  - [ ] `MergedReport` dataclass with quarantine info
-  - [ ] `ResultMerger.merge_results()`
-  - [ ] Report formatting with quarantine summary
-  - [ ] JSON detailed report
+- [x] Implement `src/clamscan_splitter/merger.py`:
+  - [x] `MergedReport` dataclass with quarantine info
+  - [x] `ResultMerger.merge_results()`
+  - [x] Report formatting with quarantine summary
+  - [x] JSON detailed report
 
   **Acceptance**: Accurate merging, clear quarantine reporting
 
