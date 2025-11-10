@@ -151,17 +151,17 @@
   **Acceptance**: State survives process crashes, no corruption
 
 ### 2.6 Scanner Module
-- [ ] Write `tests/test_scanner.py`:
-  - [ ] Test subprocess execution (mocked)
-  - [ ] Test timeout enforcement
-  - [ ] Test parallel execution
-  - [ ] Test memory-based worker limits
+- [x] Write `tests/test_scanner.py`:
+  - [x] Test subprocess execution (mocked)
+  - [x] Test timeout enforcement
+  - [x] Test parallel execution
+  - [x] Test memory-based worker limits
 
-- [ ] Implement `src/clamscan_splitter/scanner.py`:
-  - [ ] `ScanWorker.scan_chunk()`
-  - [ ] `ScanOrchestrator` with memory-aware workers
-  - [ ] Subprocess management with asyncio
-  - [ ] Integration with monitor and retry
+- [x] Implement `src/clamscan_splitter/scanner.py`:
+  - [x] `ScanWorker.scan_chunk()`
+  - [x] `ScanOrchestrator` with memory-aware workers
+  - [x] Subprocess management with asyncio
+  - [x] Integration with monitor and retry
 
   **Acceptance**: Respects memory limits, handles timeouts correctly
 
