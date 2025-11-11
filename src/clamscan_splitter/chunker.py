@@ -3,7 +3,7 @@
 import os
 import stat
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -445,38 +445,29 @@ class ChunkCreator:
                     )
                     final_chunks.append(split_chunk)
             elif needs_split and len(chunk.paths) == 1:
-                # Single path that's too large - try to split by creating multiple entries
-                # This happens when a single directory exceeds limits
-                # We'll create multiple chunks with the same path but split the counts
-                single_path = chunk.paths[0]
-                num_splits = max(
-                    2,
-                    int(chunk.estimated_size_bytes / target_size_bytes) + 1,
-                    int(chunk.file_count / config.max_files_per_chunk) + 1,
-                )
-                
-                # Split the single path into multiple chunks with proportional counts
-                for i in range(num_splits):
-                    split_size = chunk.estimated_size_bytes // num_splits
-                    split_files = chunk.file_count // num_splits
-                    split_dirs = chunk.directory_count // num_splits
-                    
-                    # Add remainder to last chunk
-                    if i == num_splits - 1:
-                        split_size = chunk.estimated_size_bytes - (split_size * (num_splits - 1))
-                        split_files = chunk.file_count - (split_files * (num_splits - 1))
-                        split_dirs = chunk.directory_count - (split_dirs * (num_splits - 1))
-                    
-                    split_chunk = ScanChunk(
-                        id=str(uuid.uuid4()),
-                        paths=[single_path],  # Same path, but split counts
-                        estimated_size_bytes=max(1, split_size),
-                        file_count=max(1, split_files),
-                        directory_count=split_dirs,
-                        created_at=datetime.now(),
-                    )
-                    final_chunks.append(split_chunk)
+                final_chunks.extend(self._split_single_path_chunk(chunk, config))
             else:
                 final_chunks.append(chunk)
         
         return final_chunks
+
+    def _split_single_path_chunk(
+        self,
+        chunk: ScanChunk,
+        config: ChunkingConfig,
+    ) -> List[ScanChunk]:
+        """Split an oversized chunk that contains a single directory path."""
+        single_path = chunk.paths[0]
+        if not os.path.isdir(single_path):
+            return [chunk]
+        
+        split_config = replace(config)
+        split_config.respect_directory_boundaries = False
+        
+        splitter = ChunkCreator()
+        try:
+            sub_chunks = splitter.create_chunks(single_path, split_config)
+        except Exception:
+            return [chunk]
+        
+        return sub_chunks or [chunk]
