@@ -2,14 +2,17 @@
 
 import inspect
 import json
+import os
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from click.testing import CliRunner
+from typing import List
 
 from clamscan_splitter.cli import cli, scan, status, list_scans, cleanup
-from clamscan_splitter.merger import MergedReport
+from clamscan_splitter.merger import MergedReport, QuarantineEntry, ResultMerger
 from clamscan_splitter.parser import InfectedFile, ScanResult
 from tests.fixtures.mock_outputs import CLEAN_SCAN_OUTPUT
 
@@ -178,6 +181,82 @@ class TestCLICommands:
         # Should complete successfully
         assert result.exit_code in [0, 1, 2]  # 0=success, 1=infections, 2=incomplete
 
+    def test_scan_command_stores_last_summary(self, tmp_path):
+        """Final report summary should be persisted in scan state."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        test_path = tmp_path / "summary_dir"
+        test_path.mkdir()
+        
+        runner = CliRunner()
+        
+        chunk = ScanChunk(
+            id="chunk-1",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        summary_holder = {}
+        
+        mock_result = ScanResult(
+            chunk_id="chunk-1",
+            status="success",
+            scanned_files=1,
+        )
+        
+        with patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
+             patch("clamscan_splitter.cli.ResultMerger") as mock_merger_class:
+            
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = None
+            def save_state_side_effect(state):
+                summary_holder["value"] = getattr(state, "last_report_summary", None)
+            mock_manager.save_state.side_effect = save_state_side_effect
+            mock_state_class.return_value = mock_manager
+            
+            mock_chunk_creator = Mock()
+            mock_chunk_creator.create_chunks.return_value = [chunk]
+            mock_chunker.return_value = mock_chunk_creator
+            
+            mock_orch_instance = Mock()
+            mock_orch_instance.scan_all = make_scan_all([mock_result])
+            mock_orch_class.return_value = mock_orch_instance
+            
+            mock_report = MergedReport(
+                total_scanned_files=1,
+                total_scanned_directories=0,
+                total_infected_files=0,
+                infected_file_paths=[],
+                total_errors=0,
+                total_data_scanned_mb=1.0,
+                total_data_read_mb=1.0,
+                total_time_seconds=1.0,
+                wall_clock_time_seconds=1.0,
+                engine_version="1.4.3",
+                chunks_successful=1,
+                chunks_failed=0,
+                chunks_partial=0,
+                scan_complete=True,
+            )
+            
+            mock_merger = Mock()
+            mock_merger.merge_results.return_value = mock_report
+            mock_merger.format_report.return_value = "FINAL SUMMARY"
+            mock_merger.save_detailed_report = Mock()
+            mock_merger.save_quarantine_report = Mock()
+            mock_merger_class.return_value = mock_merger
+            
+            result = runner.invoke(cli, ["scan", str(test_path)])
+        
+        assert result.exit_code in (0, 1, 2)
+        assert summary_holder.get("value") == "FINAL SUMMARY"
+
     def test_scan_command_with_infections(self, tmp_path):
         """Test scan command when infections are found."""
         test_path = tmp_path / "test_dir"
@@ -288,6 +367,589 @@ class TestCLICommands:
         
         # Should exit with error code (1 or 2)
         assert result.exit_code in [1, 2]
+
+    def test_resume_skips_completed_chunks(self, tmp_path):
+        """Resumed scans should not rescan already completed chunks."""
+        test_path = tmp_path / "resume_dir"
+        test_path.mkdir()
+        
+        runner = CliRunner()
+        from clamscan_splitter.chunker import ScanChunk
+        from clamscan_splitter.state import ScanState
+        from datetime import datetime
+        
+        chunk_one = ScanChunk(
+            id="chunk-1",
+            paths=[str(test_path / "a")],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        chunk_two = ScanChunk(
+            id="chunk-2",
+            paths=[str(test_path / "b")],
+            estimated_size_bytes=2048,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        stored_chunks = [
+            {
+                "id": chunk_one.id,
+                "paths": chunk_one.paths,
+                "estimated_size_bytes": chunk_one.estimated_size_bytes,
+                "file_count": chunk_one.file_count,
+                "directory_count": chunk_one.directory_count,
+                "created_at": chunk_one.created_at.isoformat(),
+            },
+            {
+                "id": chunk_two.id,
+                "paths": chunk_two.paths,
+                "estimated_size_bytes": chunk_two.estimated_size_bytes,
+                "file_count": chunk_two.file_count,
+                "directory_count": chunk_two.directory_count,
+                "created_at": chunk_two.created_at.isoformat(),
+            },
+        ]
+        
+        completed_result = ScanResult(
+            chunk_id="chunk-1",
+            status="success",
+            scanned_files=1,
+        )
+        pending_result = ScanResult(
+            chunk_id="chunk-2",
+            status="success",
+            scanned_files=1,
+        )
+        
+        state = ScanState(
+            scan_id="resume-cliid",
+            root_path=str(test_path),
+            total_chunks=2,
+            chunks=stored_chunks,
+            completed_chunks=["chunk-1"],
+            failed_chunks=[],
+            partial_results=[asdict(completed_result)],
+            start_time=datetime.now(),
+            last_update=datetime.now(),
+            configuration={
+                "chunk_size": 15.0,
+                "max_files": 30000,
+                "workers": None,
+                "timeout_per_gb": 30,
+            },
+        )
+        
+        captured_chunk_ids: List[str] = []
+        
+        async def fake_scan_all(chunks, on_result=None):
+            captured_chunk_ids.extend([chunk.id for chunk in chunks])
+            if on_result:
+                callback_result = on_result(pending_result)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            return [pending_result]
+        
+        with patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker:
+            
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = state
+            mock_state_class.return_value = mock_manager
+            
+            mock_chunk_creator = Mock()
+            mock_chunk_creator.create_chunks.return_value = [chunk_one, chunk_two]
+            mock_chunker.return_value = mock_chunk_creator
+            
+            mock_orch_instance = Mock()
+            mock_orch_instance.scan_all.side_effect = fake_scan_all
+            mock_orch_class.return_value = mock_orch_instance
+            
+            result = runner.invoke(cli, ["scan", "--resume", "resume-cliid"])
+        
+        assert result.exit_code in [0, 1]
+        assert captured_chunk_ids == ["chunk-2"]
+
+    def test_resume_merges_existing_results(self, tmp_path):
+        """Resumed report should include prior chunk results."""
+        test_path = tmp_path / "resume_dir"
+        test_path.mkdir()
+        
+        runner = CliRunner()
+        from clamscan_splitter.chunker import ScanChunk
+        from clamscan_splitter.state import ScanState
+        from datetime import datetime
+        
+        chunk_one = ScanChunk(
+            id="chunk-1",
+            paths=[str(test_path / "a")],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        chunk_two = ScanChunk(
+            id="chunk-2",
+            paths=[str(test_path / "b")],
+            estimated_size_bytes=2048,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        stored_chunks = [
+            {
+                "id": chunk_one.id,
+                "paths": chunk_one.paths,
+                "estimated_size_bytes": chunk_one.estimated_size_bytes,
+                "file_count": chunk_one.file_count,
+                "directory_count": chunk_one.directory_count,
+                "created_at": chunk_one.created_at.isoformat(),
+            },
+            {
+                "id": chunk_two.id,
+                "paths": chunk_two.paths,
+                "estimated_size_bytes": chunk_two.estimated_size_bytes,
+                "file_count": chunk_two.file_count,
+                "directory_count": chunk_two.directory_count,
+                "created_at": chunk_two.created_at.isoformat(),
+            },
+        ]
+        
+        completed_result = ScanResult(
+            chunk_id="chunk-1",
+            status="success",
+            scanned_files=5,
+        )
+        pending_result = ScanResult(
+            chunk_id="chunk-2",
+            status="success",
+            scanned_files=7,
+        )
+        
+        state = ScanState(
+            scan_id="resume-merge",
+            root_path=str(test_path),
+            total_chunks=2,
+            chunks=stored_chunks,
+            completed_chunks=["chunk-1"],
+            failed_chunks=[],
+            partial_results=[asdict(completed_result)],
+            start_time=datetime.now(),
+            last_update=datetime.now(),
+            configuration={
+                "chunk_size": 15.0,
+                "max_files": 30000,
+                "workers": None,
+                "timeout_per_gb": 30,
+            },
+        )
+        
+        async def fake_scan_all(chunks, on_result=None):
+            if on_result:
+                callback_result = on_result(pending_result)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            return [pending_result]
+        
+        with patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker, \
+             patch("clamscan_splitter.cli.ResultMerger") as mock_merger_class:
+            
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = state
+            mock_state_class.return_value = mock_manager
+            
+            mock_chunk_creator = Mock()
+            mock_chunk_creator.create_chunks.return_value = [chunk_one, chunk_two]
+            mock_chunker.return_value = mock_chunk_creator
+            
+            mock_orch_instance = Mock()
+            mock_orch_instance.scan_all.side_effect = fake_scan_all
+            mock_orch_class.return_value = mock_orch_instance
+            
+            mock_merger = Mock()
+            mock_merger.merge_results.return_value = MergedReport(
+                total_scanned_files=0,
+                total_scanned_directories=0,
+                total_infected_files=0,
+                infected_file_paths=[],
+                total_errors=0,
+                total_data_scanned_mb=0.0,
+                total_data_read_mb=0.0,
+                total_time_seconds=0.0,
+                wall_clock_time_seconds=0.0,
+                engine_version="",
+                chunks_successful=0,
+                chunks_failed=0,
+                chunks_partial=0,
+                skipped_paths=[],
+                quarantined_files=[],
+                scan_complete=True,
+            )
+            mock_merger.format_report.return_value = "report"
+            mock_merger.save_detailed_report = Mock()
+            mock_merger_class.return_value = mock_merger
+            
+            result = runner.invoke(cli, ["scan", "--resume", "resume-merge"])
+        
+        assert result.exit_code in [0, 1]
+        merge_call = mock_merger.merge_results.call_args
+        combined_results = merge_call.args[0]
+        assert len(combined_results) == 2
+        assert {res.chunk_id for res in combined_results} == {"chunk-1", "chunk-2"}
+
+    def test_scan_command_resume_without_path_argument(self, tmp_path):
+        """Resuming should not require the PATH argument."""
+        test_path = tmp_path / "resume_dir"
+        test_path.mkdir()
+
+        runner = CliRunner()
+
+        from clamscan_splitter.chunker import ScanChunk
+        from clamscan_splitter.state import ScanState
+        from datetime import datetime
+
+        stored_chunk = ScanChunk(
+            id="chunk-1",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+
+        state = ScanState(
+            scan_id="resume-cliid",
+            root_path=str(test_path),
+            total_chunks=1,
+            chunks=[{
+                "id": stored_chunk.id,
+                "paths": stored_chunk.paths,
+                "estimated_size_bytes": stored_chunk.estimated_size_bytes,
+                "file_count": stored_chunk.file_count,
+                "directory_count": stored_chunk.directory_count,
+                "created_at": stored_chunk.created_at.isoformat(),
+            }],
+            completed_chunks=[],
+            failed_chunks=[],
+            partial_results=[],
+            start_time=datetime.now(),
+            last_update=datetime.now(),
+            configuration={
+                "chunk_size": 15.0,
+                "max_files": 30000,
+                "workers": None,
+                "timeout_per_gb": 30,
+            },
+        )
+
+        result_obj = ScanResult(
+            chunk_id="chunk-1",
+            status="success",
+            scanned_files=1,
+            scanned_directories=0,
+            total_errors=0,
+            data_scanned_mb=1.0,
+            data_read_mb=1.0,
+            scan_time_seconds=1.0,
+            engine_version="1.0",
+        )
+
+        with patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker:
+
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = state
+            mock_state_class.return_value = mock_manager
+
+            mock_chunk_creator = Mock()
+            mock_chunk_creator.create_chunks.return_value = [stored_chunk]
+            mock_chunker.return_value = mock_chunk_creator
+
+            mock_orch_instance = Mock()
+            mock_orch_instance.scan_all = make_scan_all([result_obj])
+            mock_orch_class.return_value = mock_orch_instance
+
+            result = runner.invoke(cli, ["scan", "--resume", "resume-cliid"])
+
+        assert result.exit_code in [0, 1]
+        assert "Missing argument 'PATH'" not in result.output
+
+    def test_scan_command_uses_config_file_defaults(self, tmp_path, monkeypatch):
+        """Configuration file should provide default chunking/scanning settings."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        test_path = tmp_path / "config_dir"
+        test_path.mkdir()
+        (test_path / "dummy.txt").write_text("data")
+        
+        config_path = tmp_path / "config.yml"
+        config_path.write_text("dummy")
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_CONFIG", str(config_path))
+        
+        config_data = {
+            "chunking": {
+                "target_size_gb": 21.5,
+                "max_files_per_chunk": 123,
+            },
+            "scanning": {
+                "max_concurrent_processes": 4,
+                "base_timeout_per_gb": 66,
+            },
+        }
+        
+        captured_cfg = {}
+        saved_configuration = {}
+        
+        chunk = ScanChunk(
+            id="chunk-1",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        runner = CliRunner()
+        
+        with patch("clamscan_splitter.cli.ConfigLoader") as mock_loader_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker_class, \
+             patch("clamscan_splitter.cli.StateManager") as mock_state_class:
+            
+            mock_loader = Mock()
+            mock_loader.load_config.return_value = config_data
+            mock_loader.load_default_config.return_value = config_data
+            mock_loader_class.return_value = mock_loader
+            
+            mock_chunker = Mock()
+            def fake_create_chunks(root, cfg):
+                captured_cfg["target_size"] = cfg.target_size_gb
+                captured_cfg["max_files"] = cfg.max_files_per_chunk
+                return [chunk]
+            mock_chunker.create_chunks.side_effect = fake_create_chunks
+            mock_chunker_class.return_value = mock_chunker
+            
+            mock_state_manager = Mock()
+            def save_state_side_effect(state):
+                saved_configuration.update(state.configuration)
+            mock_state_manager.save_state.side_effect = save_state_side_effect
+            mock_state_manager.load_state.return_value = None
+            mock_state_class.return_value = mock_state_manager
+            
+            result = runner.invoke(cli, ["scan", str(test_path), "--dry-run"])
+        
+        assert result.exit_code == 0
+        mock_loader.load_config.assert_called_once_with(str(config_path))
+        assert captured_cfg["target_size"] == 21.5
+        assert captured_cfg["max_files"] == 123
+        assert saved_configuration["workers"] == 4
+        assert saved_configuration["timeout_per_gb"] == 66
+
+    def test_scan_command_env_overrides_when_no_cli_args(self, tmp_path, monkeypatch):
+        """Environment variables should override defaults when CLI flags unused."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        test_path = tmp_path / "env_dir"
+        test_path.mkdir()
+        (test_path / "dummy.txt").write_text("data")
+        
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_CHUNK_SIZE", "30")
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_WORKERS", "6")
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_TIMEOUT", "75")
+        
+        captured_cfg = {}
+        saved_configuration = {}
+        
+        chunk = ScanChunk(
+            id="chunk-env",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        runner = CliRunner()
+        
+        with patch("clamscan_splitter.cli.ConfigLoader") as mock_loader_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker_class, \
+             patch("clamscan_splitter.cli.StateManager") as mock_state_class:
+            
+            mock_loader = Mock()
+            mock_loader.load_default_config.return_value = {"chunking": {}, "scanning": {}}
+            mock_loader_class.return_value = mock_loader
+            
+            mock_chunker = Mock()
+            def fake_create(root, cfg):
+                captured_cfg["target_size"] = cfg.target_size_gb
+                return [chunk]
+            mock_chunker.create_chunks.side_effect = fake_create
+            mock_chunker_class.return_value = mock_chunker
+            
+            mock_state_manager = Mock()
+            mock_state_manager.load_state.return_value = None
+            mock_state_manager.save_state.side_effect = lambda state: saved_configuration.update(state.configuration)
+            mock_state_class.return_value = mock_state_manager
+            
+            result = runner.invoke(cli, ["scan", str(test_path), "--dry-run"])
+        
+        assert result.exit_code == 0
+        assert captured_cfg["target_size"] == 30.0
+        assert saved_configuration["workers"] == 6
+        assert saved_configuration["timeout_per_gb"] == 75.0
+
+    def test_cli_flags_override_environment(self, tmp_path, monkeypatch):
+        """Explicit CLI parameters should beat environment overrides."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        test_path = tmp_path / "override_dir"
+        test_path.mkdir()
+        (test_path / "dummy.txt").write_text("data")
+        
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_CHUNK_SIZE", "40")
+        
+        captured_cfg = {}
+        
+        chunk = ScanChunk(
+            id="chunk-override",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        runner = CliRunner()
+        
+        with patch("clamscan_splitter.cli.ConfigLoader") as mock_loader_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker_class, \
+             patch("clamscan_splitter.cli.StateManager") as mock_state_class:
+            
+            mock_loader = Mock()
+            mock_loader.load_default_config.return_value = {"chunking": {}, "scanning": {}}
+            mock_loader_class.return_value = mock_loader
+            
+            mock_chunker = Mock()
+            def fake_create(root, cfg):
+                captured_cfg["target_size"] = cfg.target_size_gb
+                return [chunk]
+            mock_chunker.create_chunks.side_effect = fake_create
+            mock_chunker_class.return_value = mock_chunker
+            
+            mock_state_manager = Mock()
+            mock_state_manager.load_state.return_value = None
+            mock_state_manager.save_state = Mock()
+            mock_state_class.return_value = mock_state_manager
+            
+            result = runner.invoke(
+                cli,
+                ["scan", str(test_path), "--dry-run", "--chunk-size", "12"]
+            )
+        
+        assert result.exit_code == 0
+        assert captured_cfg["target_size"] == 12.0
+
+    def test_scan_command_generates_quarantine_report(self, tmp_path):
+        """Quarantined files should trigger report saving."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        runner = CliRunner()
+        test_path = tmp_path / "quarantine_dir"
+        test_path.mkdir()
+        (test_path / "dummy.txt").write_text("data")
+        
+        chunk = ScanChunk(
+            id="chunk-q",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        scan_result = ScanResult(
+            chunk_id="chunk-q",
+            status="failed",
+        )
+        
+        quarantine_dict = {
+            "file_path": "/quarantine/file",
+            "reason": "timeout",
+            "retry_count": 1,
+            "last_attempt": datetime.now(),
+        }
+        
+        with patch("clamscan_splitter.cli.ConfigLoader") as mock_loader_class, \
+             patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker_class, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
+             patch("clamscan_splitter.cli.ResultMerger") as mock_merger_class, \
+             patch("clamscan_splitter.cli.ScanUI") as mock_ui_class:
+            
+            mock_loader = Mock()
+            mock_loader.load_default_config.return_value = {"chunking": {}, "scanning": {}}
+            mock_loader_class.return_value = mock_loader
+            
+            mock_chunker = Mock()
+            mock_chunker.create_chunks.return_value = [chunk]
+            mock_chunker_class.return_value = mock_chunker
+            
+            mock_state_manager = Mock()
+            mock_state_manager.load_state.return_value = None
+            mock_state_manager.save_state = Mock()
+            mock_state_class.return_value = mock_state_manager
+            
+            mock_orch_instance = Mock()
+            mock_orch_instance.scan_all = make_scan_all([scan_result])
+            mock_orch_instance.quarantined_files = [quarantine_dict]
+            mock_orch_class.return_value = mock_orch_instance
+            
+            mock_report = MergedReport(
+                total_scanned_files=0,
+                total_scanned_directories=0,
+                total_infected_files=0,
+                infected_file_paths=[],
+                total_errors=0,
+                total_data_scanned_mb=0.0,
+                total_data_read_mb=0.0,
+                total_time_seconds=0.0,
+                wall_clock_time_seconds=0.0,
+                engine_version="",
+                chunks_successful=0,
+                chunks_failed=0,
+                chunks_partial=0,
+                quarantined_files=[
+                    QuarantineEntry(file_path="/quarantine/file", reason="timeout")
+                ],
+                scan_complete=False,
+            )
+            
+            mock_merger = Mock()
+            mock_merger.merge_results.return_value = mock_report
+            mock_merger.format_report.return_value = "report"
+            mock_merger.save_detailed_report = Mock()
+            mock_merger.save_quarantine_report = Mock()
+            mock_merger_class.return_value = mock_merger
+            
+            mock_ui_instance = Mock()
+            mock_ui_class.return_value = mock_ui_instance
+            
+            result = runner.invoke(cli, ["scan", str(test_path)])
+        
+        assert result.exit_code in (0, 1, 2)
+        merge_kwargs = mock_merger.merge_results.call_args.kwargs
+        assert "quarantined_entries" in merge_kwargs
+        assert len(merge_kwargs["quarantined_entries"]) == 1
+        mock_merger.save_quarantine_report.assert_called_once()
 
     def test_scan_command_no_files(self, tmp_path):
         """Test scan command when no files found."""
@@ -501,6 +1163,36 @@ class TestCLICommands:
         
         assert result.exit_code == 0
         assert "test-scan" in result.output
+
+    def test_status_command_displays_last_summary(self, tmp_path):
+        """Status output should include saved report summary when available."""
+        runner = CliRunner()
+        
+        from clamscan_splitter.state import ScanState
+        from datetime import datetime
+        
+        state = ScanState(
+            scan_id="test-scan",
+            root_path=str(tmp_path),
+            total_chunks=2,
+            completed_chunks=["chunk-1"],
+            failed_chunks=[],
+            partial_results=[],
+            start_time=datetime.now(),
+            last_update=datetime.now(),
+            configuration={},
+        )
+        state.last_report_summary = "SAVED SUMMARY"
+        
+        with patch("clamscan_splitter.cli.StateManager") as mock_state:
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = state
+            mock_state.return_value = mock_manager
+            
+            result = runner.invoke(cli, ["status", "test-scan"])
+        
+        assert result.exit_code == 0
+        assert "SAVED SUMMARY" in result.output
 
     def test_cleanup_command(self):
         """Test cleanup command."""
@@ -1129,4 +1821,3 @@ class TestStatePersistence:
         loaded_state = state_manager.load_state("resume-test")
         assert loaded_state is not None
         assert loaded_state.scan_id == "resume-test"
-

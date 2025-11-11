@@ -272,6 +272,13 @@ class TestChunkCreator:
 
     def test_rebalance_chunks_splits_large(self, fs):
         """Test that rebalance splits very large chunks."""
+        fs.create_dir("/test")
+        for idx in range(3):
+            fs.create_file(
+                f"/test/file{idx}.bin",
+                st_size=int(8 * 1024**3),
+            )
+        
         # Create a chunk that's too large
         large_chunk = ScanChunk(
             id="large-chunk",
@@ -290,6 +297,37 @@ class TestChunkCreator:
         assert len(rebalanced) > 1
         for chunk in rebalanced:
             assert chunk.estimated_size_bytes <= 15.0 * 1024**3 * 1.1
+
+    def test_rebalance_chunks_splits_single_directory_without_duplicate_paths(self, fs):
+        """Large single-directory chunks are split into unique child paths."""
+        base_dir = "/data/big"
+        fs.create_dir(base_dir)
+        for idx in range(2):
+            sub_dir = f"{base_dir}/sub{idx}"
+            fs.create_dir(sub_dir)
+            fs.create_file(
+                f"{sub_dir}/file{idx}.bin",
+                st_size=int(12 * 1024**3),
+            )
+        
+        large_chunk = ScanChunk(
+            id="large-single-dir",
+            paths=[base_dir],
+            estimated_size_bytes=30 * 1024**3,
+            file_count=2,
+            directory_count=2,
+            created_at=datetime.now(),
+        )
+        
+        config = ChunkingConfig(target_size_gb=10.0)
+        creator = ChunkCreator()
+        rebalanced = creator.rebalance_chunks([large_chunk], config)
+        
+        all_paths = [path for chunk in rebalanced for path in chunk.paths]
+        
+        assert len(rebalanced) >= 2
+        assert len(all_paths) == len(set(all_paths))
+        assert base_dir not in all_paths
 
     def test_create_chunks_handles_permission_errors(self, fs):
         """Test that chunker handles permission errors gracefully."""
@@ -321,4 +359,3 @@ class TestChunkCreator:
         for prob_path in problematic:
             # Path should be in some chunk or isolated
             assert any(prob_path in p or p in prob_path for p in all_paths)
-

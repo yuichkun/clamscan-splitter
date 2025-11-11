@@ -43,7 +43,11 @@ class MergedReport:
 class ResultMerger:
     """Merges multiple scan results into unified report."""
 
-    def merge_results(self, results: List[ScanResult]) -> MergedReport:
+    def merge_results(
+        self,
+        results: List[ScanResult],
+        quarantined_entries: Optional[List[QuarantineEntry]] = None,
+    ) -> MergedReport:
         """
         Merge all scan results into single report.
 
@@ -91,6 +95,8 @@ class ResultMerger:
                 engine_version = result.engine_version
                 break
         
+        quarantine_list = list(quarantined_entries or [])
+        
         return MergedReport(
             total_scanned_files=stats["total_files"],
             total_scanned_directories=stats["total_directories"],
@@ -106,7 +112,7 @@ class ResultMerger:
             chunks_failed=stats["chunks_failed"],
             chunks_partial=stats["chunks_partial"],
             skipped_paths=stats["skipped_paths"],
-            quarantined_files=stats["quarantined_files"],
+            quarantined_files=quarantine_list,
             scan_date=datetime.now(),
             scan_complete=scan_complete,
         )
@@ -252,6 +258,32 @@ class ResultMerger:
             lines.append("Full quarantine list saved to: quarantine_report.json")
         
         return "\n".join(lines)
+
+    def save_quarantine_report(
+        self,
+        report: MergedReport,
+        path: str = "quarantine_report.json",
+    ):
+        """
+        Save detailed quarantine metadata.
+
+        Args:
+            report: MergedReport containing quarantined files
+            path: Destination JSON path
+        """
+        data = [
+            {
+                "file_path": entry.file_path,
+                "reason": entry.reason,
+                "file_size_bytes": entry.file_size_bytes,
+                "retry_count": entry.retry_count,
+                "last_attempt": entry.last_attempt.isoformat(),
+            }
+            for entry in report.quarantined_files
+        ]
+        
+        with open(path, 'w') as fh:
+            json.dump(data, fh, indent=2)
 
     def save_detailed_report(self, report: MergedReport, path: str):
         """

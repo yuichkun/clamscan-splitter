@@ -25,6 +25,7 @@ class ScanState:
     start_time: datetime = field(default_factory=datetime.now)  # When scan started
     last_update: datetime = field(default_factory=datetime.now)  # Last state update
     configuration: dict = field(default_factory=dict)  # Scan configuration used
+    last_report_summary: Optional[str] = None  # Last formatted report
 
 
 class StateManager:
@@ -166,15 +167,22 @@ class StateManager:
 class ProgressTracker:
     """Tracks and displays scan progress."""
 
-    def __init__(self, total_chunks: int):
+    def __init__(
+        self,
+        total_chunks: int,
+        initial_completed: int = 0,
+        initial_failed: int = 0,
+    ):
         """Initialize progress tracker.
         
         Args:
             total_chunks: Total number of chunks to track
+            initial_completed: Number of chunks already completed (e.g., from resume)
+            initial_failed: Number of chunks already marked failed
         """
         self.total_chunks = total_chunks
-        self.completed = 0
-        self.failed = 0
+        self.completed = max(0, initial_completed)
+        self.failed = max(0, initial_failed)
         self.current_chunks: Dict[str, str] = {}  # chunk_id -> status
         self.start_time = time.time()
 

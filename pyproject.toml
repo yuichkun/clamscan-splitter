@@ -56,6 +56,9 @@ addopts = [
     "--strict-markers",
     "--tb=short",
 ]
+markers = [
+    "asyncio: mark test as requiring an asyncio event loop",
+]
 
 [tool.coverage.run]
 source = ["src"]
@@ -82,10 +85,10 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
 
+
 [[tool.mypy.overrides]]
 module = [
     "pyfakefs.*",
     "pytest_subprocess.*",
 ]
 ignore_missing_imports = true
-

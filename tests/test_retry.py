@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from clamscan_splitter.chunker import ScanChunk
+from clamscan_splitter.parser import ScanResult
 from clamscan_splitter.retry import (
     CircuitBreaker,
     RetryConfig,
@@ -204,6 +205,52 @@ class TestRetryManager:
         assert result.status == "failed"
         assert mock_scanner.scan_chunk.call_count == config.max_attempts
 
+    @pytest.mark.asyncio
+    async def test_scan_with_retry_processes_all_split_chunks(self):
+        """All paths from a split chunk must be retried, not dropped."""
+        manager = RetryManager()
+        config = RetryConfig(max_attempts=2, base_delay_seconds=0.0)
+        chunk = ScanChunk(
+            id="parent-chunk",
+            paths=["/data/file1", "/data/file2"],
+            estimated_size_bytes=2 * 1024**3,
+            file_count=2,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        call_paths = []
+        
+        async def scan_side_effect(current_chunk, _scan_config):
+            call_paths.append(tuple(current_chunk.paths))
+            if len(current_chunk.paths) > 1:
+                raise ScanTimeoutError("Force split")
+            return ScanResult(
+                chunk_id=current_chunk.id,
+                status="success",
+                scanned_files=1,
+                scanned_directories=0,
+                total_errors=0,
+                data_scanned_mb=1.0,
+                data_read_mb=1.0,
+                scan_time_seconds=1.0,
+                engine_version="1.0",
+                raw_output="",
+                error_message=None,
+            )
+        
+        mock_scanner = AsyncMock()
+        mock_scanner.scan_chunk.side_effect = scan_side_effect
+        
+        from clamscan_splitter.scanner import ScanConfig
+        scan_config = ScanConfig()
+        result = await manager.scan_with_retry(chunk, mock_scanner, config, scan_config)
+        
+        assert ("/data/file1",) in call_paths
+        assert ("/data/file2",) in call_paths
+        assert result.scanned_files == 2
+        assert result.status == "success"
+
     def test_create_skip_list(self):
         """Test creating skip list for problematic files."""
         manager = RetryManager()
@@ -221,6 +268,60 @@ class TestRetryManager:
         
         # Should identify large files
         assert len(skip_list) >= 0  # May or may not skip based on implementation
+
+    def test_quarantine_entries_record_reason(self):
+        """Quarantine list should capture reason metadata."""
+        manager = RetryManager()
+        chunk = ScanChunk(
+            id="chunk-q",
+            paths=["/tmp/file1", "/tmp/file2"],
+            estimated_size_bytes=2048,
+            file_count=2,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        manager._create_quarantine_result(chunk, ScanTimeoutError("Timeout"))
+        
+        assert len(manager.quarantine_list) == 2
+        assert manager.quarantine_list[0]["file_path"] == "/tmp/file1"
+        assert manager.quarantine_list[0]["reason"] == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_blocks_paths(self):
+        """Paths tripping the circuit breaker should be skipped."""
+        manager = RetryManager()
+        manager.circuit_breaker = CircuitBreaker(failure_threshold=1)
+        manager.circuit_breaker.record_failure("/blocked")
+        
+        chunk = ScanChunk(
+            id="chunk-1",
+            paths=["/blocked", "/allowed"],
+            estimated_size_bytes=2048,
+            file_count=2,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        seen_paths = []
+        
+        class DummyScanner:
+            async def scan_chunk(self, new_chunk, _config):
+                seen_paths.append(list(new_chunk.paths))
+                return ScanResult(chunk_id=new_chunk.id, status="success")
+        
+        scan_config = Mock()
+        retry_config = RetryConfig(split_on_retry=False)
+        
+        result = await manager.scan_with_retry(
+            chunk,
+            DummyScanner(),
+            retry_config,
+            scan_config,
+        )
+        
+        assert result.status == "success"
+        assert seen_paths[0] == ["/allowed"]
 
 
 class TestCircuitBreaker:
@@ -277,4 +378,3 @@ class ScanTimeoutError(Exception):
 class ScanHangError(Exception):
     """Scan process appears hung."""
     pass
-

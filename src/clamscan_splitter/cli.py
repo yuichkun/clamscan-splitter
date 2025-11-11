@@ -10,11 +10,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import click
+from click.core import ParameterSource
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 from clamscan_splitter.chunker import ChunkCreator, ChunkingConfig, ScanChunk
-from clamscan_splitter.merger import MergedReport, ResultMerger
+from clamscan_splitter.config import ConfigLoader
+from clamscan_splitter.merger import MergedReport, QuarantineEntry, ResultMerger
+from clamscan_splitter.parser import InfectedFile, ScanResult
 from clamscan_splitter.scanner import ScanConfig, ScanOrchestrator
 from clamscan_splitter.state import ProgressTracker, ScanState, StateManager
 
@@ -66,6 +69,44 @@ def deserialize_chunks(serialized_chunks: List[dict]) -> List[ScanChunk]:
     return deserialized
 
 
+def deserialize_scan_results(serialized_results: List[dict]) -> List[ScanResult]:
+    """Reconstruct ScanResult objects (with infected files) from serialized dictionaries."""
+    if not serialized_results:
+        return []
+    
+    results: List[ScanResult] = []
+    for data in serialized_results:
+        infected_files: List[InfectedFile] = []
+        for infected in data.get("infected_files", []) or []:
+            if isinstance(infected, InfectedFile):
+                infected_files.append(infected)
+            elif isinstance(infected, dict):
+                infected_files.append(
+                    InfectedFile(
+                        file_path=infected.get("file_path", ""),
+                        virus_name=infected.get("virus_name", ""),
+                        action_taken=infected.get("action_taken", "FOUND"),
+                    )
+                )
+        results.append(
+            ScanResult(
+                chunk_id=data.get("chunk_id", ""),
+                status=data.get("status", "success"),
+                infected_files=infected_files,
+                scanned_files=int(data.get("scanned_files", 0)),
+                scanned_directories=int(data.get("scanned_directories", 0)),
+                total_errors=int(data.get("total_errors", 0)),
+                data_scanned_mb=float(data.get("data_scanned_mb", 0.0)),
+                data_read_mb=float(data.get("data_read_mb", 0.0)),
+                scan_time_seconds=float(data.get("scan_time_seconds", 0.0)),
+                engine_version=data.get("engine_version", ""),
+                raw_output=data.get("raw_output", ""),
+                error_message=data.get("error_message"),
+            )
+        )
+    return results
+
+
 @click.group()
 @click.version_option(version="1.0.0")
 def cli():
@@ -74,7 +115,7 @@ def cli():
 
 
 @cli.command()
-@click.argument('path', type=click.Path(exists=True))
+@click.argument('path', type=click.Path(exists=True), required=False)
 @click.option('--chunk-size', default=15.0, help='Target chunk size in GB')
 @click.option('--max-files', default=30000, help='Max files per chunk')
 @click.option('--workers', default=None, type=int, help='Number of parallel workers')
@@ -105,6 +146,67 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
         # Save report to file
         clamscan-splitter scan ~/ -o report.txt
     """
+    if not resume and not path:
+        raise click.UsageError("Missing argument 'PATH'. Provide a path or use --resume.")
+
+    ctx = click.get_current_context()
+    param_source = ctx.get_parameter_source
+    
+    config_loader = ConfigLoader()
+    config_path_env = os.getenv("CLAMSCAN_SPLITTER_CONFIG")
+    if config_path_env:
+        config_data = config_loader.load_config(config_path_env)
+    else:
+        config_data = config_loader.load_default_config()
+    
+    chunking_defaults = config_data.get("chunking", {})
+    scanning_defaults = config_data.get("scanning", {})
+    
+    def resolve_option(name, current_value, *, config_value=None, env_key=None, caster=None):
+        source = param_source(name)
+        if source != ParameterSource.DEFAULT:
+            return current_value
+        env_val = os.getenv(env_key) if env_key else None
+        if env_val not in (None, ""):
+            try:
+                return caster(env_val) if caster else env_val
+            except (ValueError, TypeError):
+                pass
+        if config_value is not None:
+            try:
+                return caster(config_value) if caster else config_value
+            except (ValueError, TypeError):
+                return current_value
+        return current_value
+    
+    chunk_size = resolve_option(
+        "chunk_size",
+        chunk_size,
+        config_value=chunking_defaults.get("target_size_gb"),
+        env_key="CLAMSCAN_SPLITTER_CHUNK_SIZE",
+        caster=float,
+    )
+    max_files = resolve_option(
+        "max_files",
+        max_files,
+        config_value=chunking_defaults.get("max_files_per_chunk"),
+        caster=int,
+    )
+    workers = resolve_option(
+        "workers",
+        workers,
+        config_value=scanning_defaults.get("max_concurrent_processes"),
+        env_key="CLAMSCAN_SPLITTER_WORKERS",
+        caster=int,
+    )
+    timeout_per_gb = resolve_option(
+        "timeout_per_gb",
+        timeout_per_gb,
+        config_value=scanning_defaults.get("base_timeout_per_gb"),
+        env_key="CLAMSCAN_SPLITTER_TIMEOUT",
+        caster=float,
+    )
+    
     state_manager = StateManager()
     state = None
     
@@ -203,6 +305,38 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
                 )
             return
         
+        completed_chunk_ids = set(getattr(state, "completed_chunks", []) or [])
+        failed_chunk_ids = set(getattr(state, "failed_chunks", []) or [])
+        stored_results_map: Dict[str, ScanResult] = {}
+        existing_completed_results: List[ScanResult] = []
+        chunks_to_scan = list(chunks)
+        
+        if resume:
+            stored_results = deserialize_scan_results(
+                getattr(state, "partial_results", []) or []
+            )
+            stored_results_map = {result.chunk_id: result for result in stored_results if result.chunk_id}
+            chunks_to_scan = [
+                chunk for chunk in chunks if chunk.id not in completed_chunk_ids
+            ]
+            existing_completed_results = [
+                stored_results_map[cid]
+                for cid in completed_chunk_ids
+                if cid in stored_results_map
+            ]
+            if completed_chunk_ids:
+                console.print(
+                    f"[cyan]Skipping {len(completed_chunk_ids)} previously completed chunk(s)[/cyan]"
+                )
+            if not chunks_to_scan:
+                console.print("[cyan]All chunks already completed. Finalizing report.[/cyan]")
+        else:
+            completed_chunk_ids = set()
+            failed_chunk_ids = set()
+        
+        initial_completed = len(completed_chunk_ids)
+        initial_failed = len(failed_chunk_ids)
+        
         # Create scan configuration
         scan_config = ScanConfig(
             max_concurrent_processes=workers,
@@ -211,10 +345,19 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
         
         # Run scan
         ui = ScanUI()
-        ui.display_scan_start(path, len(chunks))
+        ui.display_scan_start(
+            path,
+            len(chunks),
+            initial_completed=initial_completed,
+            initial_failed=initial_failed,
+        )
         
         orchestrator = ScanOrchestrator(scan_config)
-        tracker = ProgressTracker(len(chunks))
+        tracker = ProgressTracker(
+            len(chunks),
+            initial_completed=initial_completed,
+            initial_failed=initial_failed,
+        )
         
         async def run_scan():
             status_mapping = {
@@ -270,33 +413,72 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
                             infected.virus_name,
                         )
             
-            results = await orchestrator.scan_all(chunks, on_result=handle_result)
+            results = await orchestrator.scan_all(chunks_to_scan, on_result=handle_result)
+            
+            raw_quarantines = getattr(orchestrator, "quarantined_files", [])
+            if not isinstance(raw_quarantines, list):
+                raw_quarantines = []
+            
+            quarantine_entries: List[QuarantineEntry] = []
+            for entry in raw_quarantines:
+                if isinstance(entry, QuarantineEntry):
+                    quarantine_entries.append(entry)
+                    continue
+                if isinstance(entry, dict):
+                    last_attempt = entry.get("last_attempt")
+                    if isinstance(last_attempt, str):
+                        try:
+                            last_attempt = datetime.fromisoformat(last_attempt)
+                        except ValueError:
+                            last_attempt = datetime.now()
+                    elif not isinstance(last_attempt, datetime):
+                        last_attempt = datetime.now()
+                    quarantine_entries.append(
+                        QuarantineEntry(
+                            file_path=entry.get("file_path", ""),
+                            reason=entry.get("reason", "quarantine"),
+                            file_size_bytes=entry.get("file_size_bytes"),
+                            retry_count=int(entry.get("retry_count", 0) or 0),
+                            last_attempt=last_attempt,
+                        )
+                    )
             
             merger = ResultMerger()
-            report = merger.merge_results(results)
+            combined_results = list(existing_completed_results) + list(results)
+            report = merger.merge_results(combined_results, quarantined_entries=quarantine_entries)
             
-            return report
-        
-        # Execute scan
-        report = asyncio.run(run_scan())
+            return report, quarantine_entries
+
+        if chunks_to_scan:
+            # Execute scan for pending chunks
+            report, quarantine_entries = asyncio.run(run_scan())
+        else:
+            merger = ResultMerger()
+            quarantine_entries: List[QuarantineEntry] = []
+            report = merger.merge_results(
+                existing_completed_results,
+                quarantined_entries=quarantine_entries,
+            )
         
         # Display final report
         ui.display_final_report(report)
         
+        merger_for_output = ResultMerger()
+        formatted_summary = merger_for_output.format_report(report)
+        if report.quarantined_files:
+            merger_for_output.save_quarantine_report(report)
+        
         # Save report if requested
         if output:
             if json:
-                merger = ResultMerger()
-                merger.save_detailed_report(report, output)
+                merger_for_output.save_detailed_report(report, output)
             else:
-                formatted = merger.format_report(report)
                 with open(output, 'w') as f:
-                    f.write(formatted)
+                    f.write(formatted_summary)
             console.print(f"[green]Report saved to: {output}[/green]")
         elif json:
             # Output JSON to stdout
             import json as json_module
-            merger = ResultMerger()
             report_dict = {
                 "total_scanned_files": report.total_scanned_files,
                 "total_infected_files": report.total_infected_files,
@@ -306,6 +488,13 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
                 "chunks_failed": report.chunks_failed,
             }
             console.print(json_module.dumps(report_dict, indent=2))
+        
+        if state:
+            state.last_report_summary = formatted_summary
+            try:
+                state_manager.save_state(state)
+            except Exception:
+                console.print("[yellow]Warning: Failed to persist last report summary[/yellow]")
         
         # Exit with appropriate code
         if report.total_infected_files > 0:
@@ -381,6 +570,10 @@ def status(scan_id):
     console.print(f"Progress: {percentage:.1f}%")
     console.print(f"Started: {state.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     console.print(f"Last update: {state.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    if getattr(state, "last_report_summary", None):
+        console.print("\n[bold]Last Report Summary:[/bold]\n")
+        console.print(state.last_report_summary)
 
 
 @cli.command()
@@ -410,16 +603,28 @@ class ScanUI:
             console=self.console,
         )
 
-    def display_scan_start(self, path: str, chunks: int):
+    def display_scan_start(
+        self,
+        path: str,
+        chunks: int,
+        initial_completed: int = 0,
+        initial_failed: int = 0,
+    ):
         """Display scan start information."""
         self.console.print(f"[bold green]Starting scan of: {path}[/bold green]")
         self.console.print(f"[cyan]Total chunks: {chunks}[/cyan]\n")
         self.total_chunks = chunks
         self.chunk_status.clear()
         self.progress.start()
+        initial_done = min(max(chunks, 0), max(0, initial_completed + initial_failed))
         self.task_id = self.progress.add_task(
-            "Scanning chunks", total=max(chunks, 1)
+            "Scanning chunks",
+            total=max(chunks, 1),
+            completed=initial_done,
         )
+        if initial_done and self.task_id is not None:
+            description = f"Completed: {initial_completed} | Failed: {initial_failed}"
+            self.progress.update(self.task_id, description=description)
 
     def update_chunk_progress(
         self,
