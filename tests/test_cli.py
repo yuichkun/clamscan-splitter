@@ -289,6 +289,84 @@ class TestCLICommands:
         # Should exit with error code (1 or 2)
         assert result.exit_code in [1, 2]
 
+    def test_scan_command_resume_without_path_argument(self, tmp_path):
+        """Resuming should not require the PATH argument."""
+        test_path = tmp_path / "resume_dir"
+        test_path.mkdir()
+
+        runner = CliRunner()
+
+        from clamscan_splitter.chunker import ScanChunk
+        from clamscan_splitter.state import ScanState
+        from datetime import datetime
+
+        stored_chunk = ScanChunk(
+            id="chunk-1",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+
+        state = ScanState(
+            scan_id="resume-cliid",
+            root_path=str(test_path),
+            total_chunks=1,
+            chunks=[{
+                "id": stored_chunk.id,
+                "paths": stored_chunk.paths,
+                "estimated_size_bytes": stored_chunk.estimated_size_bytes,
+                "file_count": stored_chunk.file_count,
+                "directory_count": stored_chunk.directory_count,
+                "created_at": stored_chunk.created_at.isoformat(),
+            }],
+            completed_chunks=[],
+            failed_chunks=[],
+            partial_results=[],
+            start_time=datetime.now(),
+            last_update=datetime.now(),
+            configuration={
+                "chunk_size": 15.0,
+                "max_files": 30000,
+                "workers": None,
+                "timeout_per_gb": 30,
+            },
+        )
+
+        result_obj = ScanResult(
+            chunk_id="chunk-1",
+            status="success",
+            scanned_files=1,
+            scanned_directories=0,
+            total_errors=0,
+            data_scanned_mb=1.0,
+            data_read_mb=1.0,
+            scan_time_seconds=1.0,
+            engine_version="1.0",
+        )
+
+        with patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker:
+
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = state
+            mock_state_class.return_value = mock_manager
+
+            mock_chunk_creator = Mock()
+            mock_chunk_creator.create_chunks.return_value = [stored_chunk]
+            mock_chunker.return_value = mock_chunk_creator
+
+            mock_orch_instance = Mock()
+            mock_orch_instance.scan_all = make_scan_all([result_obj])
+            mock_orch_class.return_value = mock_orch_instance
+
+            result = runner.invoke(cli, ["scan", "--resume", "resume-cliid"])
+
+        assert result.exit_code in [0, 1]
+        assert "Missing argument 'PATH'" not in result.output
+
     def test_scan_command_no_files(self, tmp_path):
         """Test scan command when no files found."""
         test_path = tmp_path / "test_dir"
@@ -1129,4 +1207,3 @@ class TestStatePersistence:
         loaded_state = state_manager.load_state("resume-test")
         assert loaded_state is not None
         assert loaded_state.scan_id == "resume-test"
-

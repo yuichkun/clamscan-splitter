@@ -74,7 +74,7 @@ def cli():
 
 
 @cli.command()
-@click.argument('path', type=click.Path(exists=True))
+@click.argument('path', type=click.Path(exists=True), required=False)
 @click.option('--chunk-size', default=15.0, help='Target chunk size in GB')
 @click.option('--max-files', default=30000, help='Max files per chunk')
 @click.option('--workers', default=None, type=int, help='Number of parallel workers')
@@ -105,6 +105,9 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
         # Save report to file
         clamscan-splitter scan ~/ -o report.txt
     """
+    if not resume and not path:
+        raise click.UsageError("Missing argument 'PATH'. Provide a path or use --resume.")
+
     state_manager = StateManager()
     state = None
     
