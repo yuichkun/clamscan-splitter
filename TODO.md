@@ -274,3 +274,24 @@ mypy src/clamscan_splitter
 - **Validate atomicity**: State writes must be atomic
 
 Remember: Since you can't run actual ClamAV, the tests ARE your validation. Make them comprehensive!
+
+## Phase 7: Spec Compliance Fixes
+
+### 7.1 Resume Flow Parity with Spec §3.7 / §3.8
+- [ ] When resuming, skip chunks whose IDs are already in `completed_chunks` instead of re-scanning everything.
+- [ ] Seed `ProgressTracker`/`ScanUI` with counts from `completed_chunks` and `failed_chunks` so the progress bar reflects true resume state.
+
+### 7.2 Hang Detection Integration (Spec §1.3 Key Requirement & §3.5)
+- [ ] Wire `HangDetector`/`ResourceMonitor` into `ScanWorker` so long-running `clamscan` processes are monitored and terminated when CPU/output stalls.
+- [ ] Use `ResourceMonitor.should_reduce_concurrency()` to dynamically back off worker count when the system is overloaded, per configuration.
+
+### 7.3 Configuration Loader Usage (Spec §6.1–§6.2)
+- [ ] Load defaults via `ConfigLoader` in the CLI, merge with `CLAMSCAN_SPLITTER_CONFIG` file (env override) and CLI flags.
+- [ ] Support documented environment overrides (`CLAMSCAN_SPLITTER_WORKERS`, `CLAMSCAN_SPLITTER_CHUNK_SIZE`, etc.) so users can control behavior without flags.
+
+### 7.4 Quarantine Reporting (Spec §3.6 & §3.3 Summary Format)
+- [ ] Plumb `RetryManager.quarantine_list` into `ResultMerger` so quarantined paths populate `MergedReport.quarantined_files`.
+- [ ] Actually emit the `quarantine_report.json` file referenced in `format_report` whenever quarantined files exist.
+
+### 7.5 Circuit Breaker Usage (Spec §3.4)
+- [ ] Integrate the `CircuitBreaker` with the retry/orchestrator pipeline so paths that repeatedly fail are skipped/quarantined according to the spec.
