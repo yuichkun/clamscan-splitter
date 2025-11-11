@@ -51,61 +51,143 @@ class RetryManager:
         retry_config: RetryConfig,
         scan_config,
     ) -> ScanResult:
-        """
-        Scan with exponential backoff retry and quarantine.
+        """Retry scanning a chunk with exponential backoff and splitting."""
+        return await self._scan_chunk_with_retry(
+            chunk,
+            scanner,
+            retry_config,
+            scan_config,
+            original_chunk_id=chunk.id,
+        )
 
-        Args:
-            chunk: ScanChunk to scan
-            scanner: Scanner instance with scan_chunk method
-            retry_config: Retry configuration
-            scan_config: Scan configuration (ScanConfig) to pass to scanner
+    async def _scan_chunk_with_retry(
+        self,
+        chunk: ScanChunk,
+        scanner,
+        retry_config: RetryConfig,
+        scan_config,
+        original_chunk_id: Optional[str] = None,
+    ) -> ScanResult:
+        """Internal helper that performs retry logic and optional splitting."""
+        orig_id = original_chunk_id or chunk.id
 
-        Returns:
-            ScanResult (may be partial with quarantined files noted)
-        """
         for attempt in range(retry_config.max_attempts):
             try:
-                # Check if any files in chunk exceed retry limit
                 files_to_skip = self._get_files_to_skip(chunk, retry_config)
                 if files_to_skip:
                     chunk = self._exclude_files_from_chunk(chunk, files_to_skip)
                     self.quarantine_list.extend(files_to_skip)
 
                 result = await scanner.scan_chunk(chunk, scan_config)
+                result.chunk_id = orig_id
                 return result
 
-            except Exception as e:
-                # Check if it's a timeout or hang error (check by class name for flexibility)
+            except Exception as e:  # noqa: BLE001
                 error_type_name = type(e).__name__
                 is_timeout_or_hang = (
                     isinstance(e, (ScanTimeoutError, ScanHangError))
                     or error_type_name in ("ScanTimeoutError", "ScanHangError")
                 )
-                
+
                 if is_timeout_or_hang:
-                    # Track which files might be problematic
                     self._update_file_retry_counts(chunk)
 
                     if attempt == retry_config.max_attempts - 1:
-                        # Final attempt failed - quarantine and report
-                        return self._create_quarantine_result(chunk, e)
+                        failure = self._create_quarantine_result(chunk, e)
+                        failure.chunk_id = orig_id
+                        return failure
 
-                    # Calculate backoff delay
                     delay = self.calculate_backoff(attempt, retry_config)
                     await asyncio.sleep(delay)
 
-                    # Split chunk for next attempt
                     if retry_config.split_on_retry and len(chunk.paths) > 1:
                         split_chunks = self.split_chunk(chunk, 2 ** (attempt + 1))
                         if split_chunks:
-                            # Use first split chunk for next attempt
-                            chunk = split_chunks[0]
+                            return await self._scan_split_chunks(
+                                split_chunks,
+                                scanner,
+                                retry_config,
+                                scan_config,
+                                orig_id,
+                            )
                 else:
-                    # Re-raise if it's not a timeout/hang error
                     raise
 
-        # Should not reach here, but return error result
-        return self._create_quarantine_result(chunk, ScanTimeoutError("Max attempts exceeded"))
+        failure = self._create_quarantine_result(
+            chunk,
+            ScanTimeoutError("Max attempts exceeded"),
+        )
+        failure.chunk_id = orig_id
+        return failure
+
+    async def _scan_split_chunks(
+        self,
+        split_chunks: List[ScanChunk],
+        scanner,
+        retry_config: RetryConfig,
+        scan_config,
+        original_chunk_id: str,
+    ) -> ScanResult:
+        """Scan each split chunk and merge their results."""
+        combined_results: List[ScanResult] = []
+
+        for sub_chunk in split_chunks:
+            result = await self._scan_chunk_with_retry(
+                sub_chunk,
+                scanner,
+                retry_config,
+                scan_config,
+                original_chunk_id=sub_chunk.id,
+            )
+            combined_results.append(result)
+
+        return self._combine_results(combined_results, original_chunk_id)
+
+    def _combine_results(
+        self,
+        results: List[ScanResult],
+        original_chunk_id: str,
+    ) -> ScanResult:
+        """Aggregate multiple ScanResult objects into one."""
+        combined = ScanResult(chunk_id=original_chunk_id)
+        statuses: List[str] = []
+        raw_outputs: List[str] = []
+        error_messages: List[str] = []
+
+        for result in results:
+            if result is None:
+                continue
+
+            statuses.append(result.status)
+            combined.scanned_files += result.scanned_files
+            combined.scanned_directories += result.scanned_directories
+            combined.total_errors += result.total_errors
+            combined.data_scanned_mb += result.data_scanned_mb
+            combined.data_read_mb += result.data_read_mb
+            combined.scan_time_seconds += result.scan_time_seconds
+            combined.infected_files.extend(result.infected_files)
+
+            if not combined.engine_version and result.engine_version:
+                combined.engine_version = result.engine_version
+
+            if result.raw_output:
+                raw_outputs.append(result.raw_output)
+            if result.error_message:
+                error_messages.append(result.error_message)
+
+        if "failed" in statuses:
+            combined.status = "failed"
+        elif "partial" in statuses:
+            combined.status = "partial"
+        elif statuses:
+            combined.status = "success"
+
+        combined.raw_output = "\n".join(raw_outputs).strip()
+        combined.error_message = (
+            "\n".join(error_messages).strip() if error_messages else None
+        )
+
+        return combined
 
     def calculate_backoff(self, attempt: int, config: RetryConfig) -> float:
         """

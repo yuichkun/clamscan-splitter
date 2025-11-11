@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from clamscan_splitter.chunker import ScanChunk
+from clamscan_splitter.parser import ScanResult
 from clamscan_splitter.retry import (
     CircuitBreaker,
     RetryConfig,
@@ -203,6 +204,52 @@ class TestRetryManager:
         assert result is not None
         assert result.status == "failed"
         assert mock_scanner.scan_chunk.call_count == config.max_attempts
+
+    @pytest.mark.asyncio
+    async def test_scan_with_retry_processes_all_split_chunks(self):
+        """All paths from a split chunk must be retried, not dropped."""
+        manager = RetryManager()
+        config = RetryConfig(max_attempts=2, base_delay_seconds=0.0)
+        chunk = ScanChunk(
+            id="parent-chunk",
+            paths=["/data/file1", "/data/file2"],
+            estimated_size_bytes=2 * 1024**3,
+            file_count=2,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        call_paths = []
+        
+        async def scan_side_effect(current_chunk, _scan_config):
+            call_paths.append(tuple(current_chunk.paths))
+            if len(current_chunk.paths) > 1:
+                raise ScanTimeoutError("Force split")
+            return ScanResult(
+                chunk_id=current_chunk.id,
+                status="success",
+                scanned_files=1,
+                scanned_directories=0,
+                total_errors=0,
+                data_scanned_mb=1.0,
+                data_read_mb=1.0,
+                scan_time_seconds=1.0,
+                engine_version="1.0",
+                raw_output="",
+                error_message=None,
+            )
+        
+        mock_scanner = AsyncMock()
+        mock_scanner.scan_chunk.side_effect = scan_side_effect
+        
+        from clamscan_splitter.scanner import ScanConfig
+        scan_config = ScanConfig()
+        result = await manager.scan_with_retry(chunk, mock_scanner, config, scan_config)
+        
+        assert ("/data/file1",) in call_paths
+        assert ("/data/file2",) in call_paths
+        assert result.scanned_files == 2
+        assert result.status == "success"
 
     def test_create_skip_list(self):
         """Test creating skip list for problematic files."""
