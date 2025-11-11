@@ -183,6 +183,13 @@ class TestProgressTracker:
         assert tracker.completed == 0
         assert tracker.failed == 0
 
+    def test_progress_tracker_initial_counts(self):
+        """Tracker honors provided initial completed/failed counts."""
+        tracker = ProgressTracker(total_chunks=10, initial_completed=3, initial_failed=2)
+        
+        assert tracker.completed == 3
+        assert tracker.failed == 2
+
     def test_update_chunk_status(self):
         """Test updating chunk status."""
         tracker = ProgressTracker(total_chunks=5)
@@ -235,4 +242,3 @@ class TestProgressTracker:
         
         assert "50%" in progress_bar or "5" in progress_bar
         assert "10" in progress_bar  # Total chunks
-
