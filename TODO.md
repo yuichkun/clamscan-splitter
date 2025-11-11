@@ -294,4 +294,4 @@ Remember: Since you can't run actual ClamAV, the tests ARE your validation. Make
 - [x] Actually emit the `quarantine_report.json` file referenced in `format_report` whenever quarantined files exist.
 
 ### 7.5 Circuit Breaker Usage (Spec §3.4)
-- [ ] Integrate the `CircuitBreaker` with the retry/orchestrator pipeline so paths that repeatedly fail are skipped/quarantined according to the spec.
+- [x] Integrate the `CircuitBreaker` with the retry/orchestrator pipeline so paths that repeatedly fail are skipped/quarantined according to the spec.

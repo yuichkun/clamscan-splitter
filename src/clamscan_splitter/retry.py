@@ -12,7 +12,6 @@ from typing import List, Optional
 from clamscan_splitter.chunker import ScanChunk
 from clamscan_splitter.parser import ScanResult
 
-
 class ScanTimeoutError(Exception):
     """Scan exceeded timeout."""
     pass
@@ -43,6 +42,7 @@ class RetryManager:
         """Initialize retry manager."""
         self.file_retry_counts: defaultdict[str, int] = defaultdict(int)
         self.quarantine_list: List[dict] = []
+        self.circuit_breaker = CircuitBreaker()
 
     async def scan_with_retry(
         self,
@@ -297,6 +297,9 @@ class RetryManager:
         for path in chunk.paths:
             if self.file_retry_counts[path] >= config.max_attempts_per_file:
                 files_to_skip.append(path)
+                continue
+            if self.circuit_breaker.is_blocked(path):
+                files_to_skip.append(path)
         
         return files_to_skip
 
@@ -326,6 +329,7 @@ class RetryManager:
         """Update retry counts for files in chunk."""
         for path in chunk.paths:
             self.file_retry_counts[path] += 1
+            self.circuit_breaker.record_failure(path)
 
     def _create_quarantine_result(self, chunk: ScanChunk, error: Exception) -> ScanResult:
         """Create result indicating quarantine."""

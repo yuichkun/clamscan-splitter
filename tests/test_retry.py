@@ -287,6 +287,42 @@ class TestRetryManager:
         assert manager.quarantine_list[0]["file_path"] == "/tmp/file1"
         assert manager.quarantine_list[0]["reason"] == "timeout"
 
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_blocks_paths(self):
+        """Paths tripping the circuit breaker should be skipped."""
+        manager = RetryManager()
+        manager.circuit_breaker = CircuitBreaker(failure_threshold=1)
+        manager.circuit_breaker.record_failure("/blocked")
+        
+        chunk = ScanChunk(
+            id="chunk-1",
+            paths=["/blocked", "/allowed"],
+            estimated_size_bytes=2048,
+            file_count=2,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        seen_paths = []
+        
+        class DummyScanner:
+            async def scan_chunk(self, new_chunk, _config):
+                seen_paths.append(list(new_chunk.paths))
+                return ScanResult(chunk_id=new_chunk.id, status="success")
+        
+        scan_config = Mock()
+        retry_config = RetryConfig(split_on_retry=False)
+        
+        result = await manager.scan_with_retry(
+            chunk,
+            DummyScanner(),
+            retry_config,
+            scan_config,
+        )
+        
+        assert result.status == "success"
+        assert seen_paths[0] == ["/allowed"]
+
 
 class TestCircuitBreaker:
     """Test CircuitBreaker class."""
