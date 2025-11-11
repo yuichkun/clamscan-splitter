@@ -286,8 +286,8 @@ Remember: Since you can't run actual ClamAV, the tests ARE your validation. Make
 - [x] Use `ResourceMonitor.should_reduce_concurrency()` to dynamically back off worker count when the system is overloaded, per configuration.
 
 ### 7.3 Configuration Loader Usage (Spec §6.1–§6.2)
-- [ ] Load defaults via `ConfigLoader` in the CLI, merge with `CLAMSCAN_SPLITTER_CONFIG` file (env override) and CLI flags.
-- [ ] Support documented environment overrides (`CLAMSCAN_SPLITTER_WORKERS`, `CLAMSCAN_SPLITTER_CHUNK_SIZE`, etc.) so users can control behavior without flags.
+- [x] Load defaults via `ConfigLoader` in the CLI, merge with `CLAMSCAN_SPLITTER_CONFIG` file (env override) and CLI flags.
+- [x] Support documented environment overrides (`CLAMSCAN_SPLITTER_WORKERS`, `CLAMSCAN_SPLITTER_CHUNK_SIZE`, etc.) so users can control behavior without flags.
 
 ### 7.4 Quarantine Reporting (Spec §3.6 & §3.3 Summary Format)
 - [ ] Plumb `RetryManager.quarantine_list` into `ResultMerger` so quarantined paths populate `MergedReport.quarantined_files`.

@@ -2,6 +2,7 @@
 
 import inspect
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -607,6 +608,183 @@ class TestCLICommands:
 
         assert result.exit_code in [0, 1]
         assert "Missing argument 'PATH'" not in result.output
+
+    def test_scan_command_uses_config_file_defaults(self, tmp_path, monkeypatch):
+        """Configuration file should provide default chunking/scanning settings."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        test_path = tmp_path / "config_dir"
+        test_path.mkdir()
+        (test_path / "dummy.txt").write_text("data")
+        
+        config_path = tmp_path / "config.yml"
+        config_path.write_text("dummy")
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_CONFIG", str(config_path))
+        
+        config_data = {
+            "chunking": {
+                "target_size_gb": 21.5,
+                "max_files_per_chunk": 123,
+            },
+            "scanning": {
+                "max_concurrent_processes": 4,
+                "base_timeout_per_gb": 66,
+            },
+        }
+        
+        captured_cfg = {}
+        saved_configuration = {}
+        
+        chunk = ScanChunk(
+            id="chunk-1",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        runner = CliRunner()
+        
+        with patch("clamscan_splitter.cli.ConfigLoader") as mock_loader_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker_class, \
+             patch("clamscan_splitter.cli.StateManager") as mock_state_class:
+            
+            mock_loader = Mock()
+            mock_loader.load_config.return_value = config_data
+            mock_loader.load_default_config.return_value = config_data
+            mock_loader_class.return_value = mock_loader
+            
+            mock_chunker = Mock()
+            def fake_create_chunks(root, cfg):
+                captured_cfg["target_size"] = cfg.target_size_gb
+                captured_cfg["max_files"] = cfg.max_files_per_chunk
+                return [chunk]
+            mock_chunker.create_chunks.side_effect = fake_create_chunks
+            mock_chunker_class.return_value = mock_chunker
+            
+            mock_state_manager = Mock()
+            def save_state_side_effect(state):
+                saved_configuration.update(state.configuration)
+            mock_state_manager.save_state.side_effect = save_state_side_effect
+            mock_state_manager.load_state.return_value = None
+            mock_state_class.return_value = mock_state_manager
+            
+            result = runner.invoke(cli, ["scan", str(test_path), "--dry-run"])
+        
+        assert result.exit_code == 0
+        mock_loader.load_config.assert_called_once_with(str(config_path))
+        assert captured_cfg["target_size"] == 21.5
+        assert captured_cfg["max_files"] == 123
+        assert saved_configuration["workers"] == 4
+        assert saved_configuration["timeout_per_gb"] == 66
+
+    def test_scan_command_env_overrides_when_no_cli_args(self, tmp_path, monkeypatch):
+        """Environment variables should override defaults when CLI flags unused."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        test_path = tmp_path / "env_dir"
+        test_path.mkdir()
+        (test_path / "dummy.txt").write_text("data")
+        
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_CHUNK_SIZE", "30")
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_WORKERS", "6")
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_TIMEOUT", "75")
+        
+        captured_cfg = {}
+        saved_configuration = {}
+        
+        chunk = ScanChunk(
+            id="chunk-env",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        runner = CliRunner()
+        
+        with patch("clamscan_splitter.cli.ConfigLoader") as mock_loader_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker_class, \
+             patch("clamscan_splitter.cli.StateManager") as mock_state_class:
+            
+            mock_loader = Mock()
+            mock_loader.load_default_config.return_value = {"chunking": {}, "scanning": {}}
+            mock_loader_class.return_value = mock_loader
+            
+            mock_chunker = Mock()
+            def fake_create(root, cfg):
+                captured_cfg["target_size"] = cfg.target_size_gb
+                return [chunk]
+            mock_chunker.create_chunks.side_effect = fake_create
+            mock_chunker_class.return_value = mock_chunker
+            
+            mock_state_manager = Mock()
+            mock_state_manager.load_state.return_value = None
+            mock_state_manager.save_state.side_effect = lambda state: saved_configuration.update(state.configuration)
+            mock_state_class.return_value = mock_state_manager
+            
+            result = runner.invoke(cli, ["scan", str(test_path), "--dry-run"])
+        
+        assert result.exit_code == 0
+        assert captured_cfg["target_size"] == 30.0
+        assert saved_configuration["workers"] == 6
+        assert saved_configuration["timeout_per_gb"] == 75.0
+
+    def test_cli_flags_override_environment(self, tmp_path, monkeypatch):
+        """Explicit CLI parameters should beat environment overrides."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        test_path = tmp_path / "override_dir"
+        test_path.mkdir()
+        (test_path / "dummy.txt").write_text("data")
+        
+        monkeypatch.setenv("CLAMSCAN_SPLITTER_CHUNK_SIZE", "40")
+        
+        captured_cfg = {}
+        
+        chunk = ScanChunk(
+            id="chunk-override",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        runner = CliRunner()
+        
+        with patch("clamscan_splitter.cli.ConfigLoader") as mock_loader_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker_class, \
+             patch("clamscan_splitter.cli.StateManager") as mock_state_class:
+            
+            mock_loader = Mock()
+            mock_loader.load_default_config.return_value = {"chunking": {}, "scanning": {}}
+            mock_loader_class.return_value = mock_loader
+            
+            mock_chunker = Mock()
+            def fake_create(root, cfg):
+                captured_cfg["target_size"] = cfg.target_size_gb
+                return [chunk]
+            mock_chunker.create_chunks.side_effect = fake_create
+            mock_chunker_class.return_value = mock_chunker
+            
+            mock_state_manager = Mock()
+            mock_state_manager.load_state.return_value = None
+            mock_state_manager.save_state = Mock()
+            mock_state_class.return_value = mock_state_manager
+            
+            result = runner.invoke(
+                cli,
+                ["scan", str(test_path), "--dry-run", "--chunk-size", "12"]
+            )
+        
+        assert result.exit_code == 0
+        assert captured_cfg["target_size"] == 12.0
 
     def test_scan_command_no_files(self, tmp_path):
         """Test scan command when no files found."""

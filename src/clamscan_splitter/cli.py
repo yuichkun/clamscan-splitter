@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import click
+from click.core import ParameterSource
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 from clamscan_splitter.chunker import ChunkCreator, ChunkingConfig, ScanChunk
+from clamscan_splitter.config import ConfigLoader
 from clamscan_splitter.merger import MergedReport, ResultMerger
 from clamscan_splitter.parser import InfectedFile, ScanResult
 from clamscan_splitter.scanner import ScanConfig, ScanOrchestrator
@@ -147,6 +149,64 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
     if not resume and not path:
         raise click.UsageError("Missing argument 'PATH'. Provide a path or use --resume.")
 
+    ctx = click.get_current_context()
+    param_source = ctx.get_parameter_source
+    
+    config_loader = ConfigLoader()
+    config_path_env = os.getenv("CLAMSCAN_SPLITTER_CONFIG")
+    if config_path_env:
+        config_data = config_loader.load_config(config_path_env)
+    else:
+        config_data = config_loader.load_default_config()
+    
+    chunking_defaults = config_data.get("chunking", {})
+    scanning_defaults = config_data.get("scanning", {})
+    
+    def resolve_option(name, current_value, *, config_value=None, env_key=None, caster=None):
+        source = param_source(name)
+        if source != ParameterSource.DEFAULT:
+            return current_value
+        env_val = os.getenv(env_key) if env_key else None
+        if env_val not in (None, ""):
+            try:
+                return caster(env_val) if caster else env_val
+            except (ValueError, TypeError):
+                pass
+        if config_value is not None:
+            try:
+                return caster(config_value) if caster else config_value
+            except (ValueError, TypeError):
+                return current_value
+        return current_value
+    
+    chunk_size = resolve_option(
+        "chunk_size",
+        chunk_size,
+        config_value=chunking_defaults.get("target_size_gb"),
+        env_key="CLAMSCAN_SPLITTER_CHUNK_SIZE",
+        caster=float,
+    )
+    max_files = resolve_option(
+        "max_files",
+        max_files,
+        config_value=chunking_defaults.get("max_files_per_chunk"),
+        caster=int,
+    )
+    workers = resolve_option(
+        "workers",
+        workers,
+        config_value=scanning_defaults.get("max_concurrent_processes"),
+        env_key="CLAMSCAN_SPLITTER_WORKERS",
+        caster=int,
+    )
+    timeout_per_gb = resolve_option(
+        "timeout_per_gb",
+        timeout_per_gb,
+        config_value=scanning_defaults.get("base_timeout_per_gb"),
+        env_key="CLAMSCAN_SPLITTER_TIMEOUT",
+        caster=float,
+    )
+    
     state_manager = StateManager()
     state = None
     
