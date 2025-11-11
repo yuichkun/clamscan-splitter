@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 
 import click
@@ -58,10 +59,12 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
         # Save report to file
         clamscan-splitter scan ~/ -o report.txt
     """
+    state_manager = StateManager()
+    state = None
+    
     try:
         if resume:
             # Resume existing scan
-            state_manager = StateManager()
             state = state_manager.load_state(resume)
             if not state:
                 console.print(f"[red]Error: Scan ID '{resume}' not found[/red]")
@@ -69,14 +72,15 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
             
             console.print(f"[green]Resuming scan: {resume}[/green]")
             path = state.root_path
+            scan_id = state.scan_id
             # Use state configuration
             chunk_size = state.configuration.get('chunk_size', chunk_size)
             max_files = state.configuration.get('max_files', max_files)
             workers = state.configuration.get('workers', workers)
+            timeout_per_gb = state.configuration.get('timeout_per_gb', timeout_per_gb)
         else:
-            # Create new scan
-            scan_id = str(uuid.uuid4())[:8]
-            console.print(f"[green]Starting scan: {scan_id}[/green]")
+            # Create new scan - scan_id will be set after chunks are created
+            scan_id = None
         
         # Create chunking configuration
         chunk_config = ChunkingConfig(
@@ -94,6 +98,34 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
             return
         
         console.print(f"[green]Created {len(chunks)} chunks[/green]")
+        
+        # Create or update state with chunk information
+        if not resume:
+            # Create new scan state
+            scan_id = str(uuid.uuid4())[:8]
+            console.print(f"[green]Starting scan: {scan_id}[/green]")
+            
+            state = ScanState(
+                scan_id=scan_id,
+                root_path=str(path),
+                total_chunks=len(chunks),
+                completed_chunks=[],
+                failed_chunks=[],
+                partial_results=[],
+                configuration={
+                    'chunk_size': chunk_size,
+                    'max_files': max_files,
+                    'workers': workers,
+                    'timeout_per_gb': timeout_per_gb,
+                }
+            )
+            # Save initial state
+            state_manager.save_state(state)
+        else:
+            # Update existing state if chunk count changed
+            if state.total_chunks != len(chunks):
+                state.total_chunks = len(chunks)
+                state_manager.save_state(state)
         
         if dry_run:
             # Show chunk information
@@ -122,10 +154,41 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
         async def run_scan():
             results = await orchestrator.scan_all(chunks)
             
-            # Update progress
+            # Update progress and state
             for result in results:
                 if result:
                     tracker.update_chunk_status(result.chunk_id, result.status)
+                    
+                    # Update state
+                    if result.status == "success":
+                        if result.chunk_id not in state.completed_chunks:
+                            state.completed_chunks.append(result.chunk_id)
+                        # Remove from failed if it was there
+                        if result.chunk_id in state.failed_chunks:
+                            state.failed_chunks.remove(result.chunk_id)
+                    elif result.status in ("failed", "timeout"):
+                        if result.chunk_id not in state.failed_chunks:
+                            state.failed_chunks.append(result.chunk_id)
+                        # Remove from completed if it was there
+                        if result.chunk_id in state.completed_chunks:
+                            state.completed_chunks.remove(result.chunk_id)
+                    
+                    # Store result as dict
+                    result_dict = asdict(result)
+                    # Update or append to partial_results
+                    existing_idx = None
+                    for idx, pr in enumerate(state.partial_results):
+                        if pr.get('chunk_id') == result.chunk_id:
+                            existing_idx = idx
+                            break
+                    if existing_idx is not None:
+                        state.partial_results[existing_idx] = result_dict
+                    else:
+                        state.partial_results.append(result_dict)
+                    
+                    # Save state after each chunk
+                    state_manager.save_state(state)
+                    
                     if result.infected_files:
                         for infected in result.infected_files:
                             ui.display_infected_file(
@@ -179,6 +242,13 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
             
     except KeyboardInterrupt:
         console.print("\n[yellow]Scan interrupted by user[/yellow]")
+        # Save state before exiting so scan can be resumed
+        if state:
+            try:
+                state_manager.save_state(state)
+                console.print(f"[cyan]State saved. Resume with: clamscan-splitter scan --resume {state.scan_id}[/cyan]")
+            except Exception as e:
+                console.print(f"[red]Warning: Failed to save state: {e}[/red]")
         sys.exit(130)
     except Exception as e:
         console.print(f"[red]Error: {str(e)}[/red]")
