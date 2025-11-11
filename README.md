@@ -8,6 +8,8 @@ A high-performance Python tool for scanning large directories (1M+ files) with C
 - **Hang Detection**: Monitors processes for hangs using CPU usage and output activity
 - **Intelligent Retry**: Exponential backoff with chunk splitting for failed scans
 - **Resumable Scans**: Atomic state persistence allows resuming interrupted scans
+- **Real-Time Progress**: Saves state after every chunk so `clamscan-splitter list` reflects in-progress scans immediately
+- **Deterministic Chunking**: Persists chunk definitions to ensure resumed scans reuse the same chunk boundaries and IDs
 - **Memory-Aware**: Automatically calculates optimal worker count based on available memory
 - **Comprehensive Reporting**: Merges results from all chunks into a single corporate-formatted report
 - **Quarantine System**: Tracks files that couldn't be scanned for manual review
@@ -111,6 +113,8 @@ clamscan-splitter scan --resume <scan-id>
 # Check scan status
 clamscan-splitter status <scan-id>
 ```
+
+While a scan is running, progress is written to disk after every completed chunk. You can run `clamscan-splitter list` in another terminal to watch the live progress indicators update.
 
 ## Configuration
 

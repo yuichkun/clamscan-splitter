@@ -18,6 +18,7 @@ class ScanState:
     scan_id: str  # Unique scan identifier
     root_path: str  # Root path being scanned
     total_chunks: int  # Total number of chunks
+    chunks: List[dict] = field(default_factory=list)  # Serialized chunk definitions
     completed_chunks: List[str] = field(default_factory=list)  # IDs of completed chunks
     failed_chunks: List[str] = field(default_factory=list)  # IDs of failed chunks
     partial_results: List[dict] = field(default_factory=list)  # Results collected so far (as dicts)
@@ -107,6 +108,8 @@ class StateManager:
                 state_dict["start_time"] = datetime.fromisoformat(state_dict["start_time"])
             if "last_update" in state_dict and isinstance(state_dict["last_update"], str):
                 state_dict["last_update"] = datetime.fromisoformat(state_dict["last_update"])
+            
+            state_dict.setdefault("chunks", [])
             
             return ScanState(**state_dict)
         except (json.JSONDecodeError, KeyError, ValueError):

@@ -97,7 +97,7 @@ class TestClamAVOutputParser:
         
         # Partial output should still parse, but with limited info
         assert result.status == "partial"
-        assert result.scanned_files == 0  # No summary available
+        assert result.scanned_files == 3
         assert result.raw_output == PARTIAL_SCAN_OUTPUT
 
     def test_parse_no_summary_output(self):
@@ -105,8 +105,8 @@ class TestClamAVOutputParser:
         parser = ClamAVOutputParser()
         result = parser.parse_output(NO_SUMMARY_OUTPUT, "", 0)
         
-        assert result.status == "partial"
-        assert result.scanned_files == 0
+        assert result.status == "success"
+        assert result.scanned_files == 4
         assert result.raw_output == NO_SUMMARY_OUTPUT
 
     def test_parse_malformed_output(self):

@@ -323,16 +323,20 @@ class ScanOrchestrator:
             return min(max_by_memory, max_by_cpu, self.config.max_concurrent_processes)
         return max(1, min(max_by_memory, max_by_cpu))
 
-    async def scan_all(self, chunks: List[ScanChunk]) -> List[ScanResult]:
+    async def scan_all(
+        self,
+        chunks: List[ScanChunk],
+        on_result: Optional[Callable[[ScanResult], Awaitable[None]]] = None,
+    ) -> List[ScanResult]:
         """
         Scan all chunks in parallel with concurrency limit.
 
         Process:
         1. Create task for each chunk
         2. Use semaphore to limit concurrency
-        3. Gather results
-        4. Handle failed chunks
-        5. Return all results
+        3. Asynchronously yield results as soon as each chunk finishes
+        4. Invoke `on_result` callback (sync or async) per chunk for streaming updates
+        5. Track failed chunks and return all results when complete
         """
         pass
 
@@ -816,6 +820,7 @@ class ScanState:
     scan_id: str                    # Unique scan identifier
     root_path: str                  # Root path being scanned
     total_chunks: int               # Total number of chunks
+    chunks: List[dict]              # Serialized chunk metadata (preserves IDs for resume)
     completed_chunks: List[str]     # IDs of completed chunks
     failed_chunks: List[str]        # IDs of failed chunks
     partial_results: List[ScanResult]  # Results collected so far
@@ -996,14 +1001,25 @@ class ScanUI:
         self.progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             console=self.console
         )
+        self.task_id: Optional[int] = None
+        self.chunk_status: Dict[str, str] = {}
 
     def display_scan_start(self, path: str, chunks: int):
         """Display scan start information"""
         pass
 
-    def update_chunk_progress(self, chunk_id: str, status: str):
+    def update_chunk_progress(
+        self,
+        chunk_id: str,
+        status: str,
+        completed: int,
+        failed: int,
+        total: int,
+    ):
         """Update progress display for a chunk"""
         pass
 

@@ -3,12 +3,13 @@
 import asyncio
 import psutil
 from dataclasses import dataclass, field
-from typing import List, Optional
+import inspect
+from typing import Awaitable, Callable, List, Optional
 
 from clamscan_splitter.chunker import ScanChunk
 from clamscan_splitter.monitor import HangDetector
 from clamscan_splitter.parser import ClamAVOutputParser, ScanResult
-from clamscan_splitter.retry import RetryManager, ScanHangError, ScanTimeoutError
+from clamscan_splitter.retry import RetryManager, ScanTimeoutError
 
 
 @dataclass
@@ -53,12 +54,13 @@ class ScanWorker:
                 timeout=timeout + 10,  # Add buffer for cleanup
             )
             
-            # Parse output
-            result = self.parser.parse_output(stdout, stderr, return_code)
-            result.chunk_id = chunk.id
-            
-            return result
-            
+            return self._build_scan_result(
+                chunk,
+                stdout,
+                stderr,
+                return_code,
+            )
+        
         except asyncio.TimeoutError:
             raise ScanTimeoutError(f"Scan exceeded timeout of {timeout} seconds")
         except Exception as e:
@@ -76,6 +78,33 @@ class ScanWorker:
         timeout = max(timeout, config.min_timeout_seconds)
         timeout = min(timeout, config.max_timeout_seconds)
         return timeout
+
+    def _build_scan_result(
+        self,
+        chunk: ScanChunk,
+        stdout: str,
+        stderr: str,
+        return_code: int,
+    ) -> ScanResult:
+        """Convert raw clamscan output into a ScanResult."""
+        parsed_result = self.parser.parse_output(stdout, stderr, return_code)
+        if not isinstance(parsed_result, ScanResult):
+            raise TypeError("Unexpected parser return type")
+        
+        return ScanResult(
+            chunk_id=chunk.id,
+            status=parsed_result.status,
+            infected_files=parsed_result.infected_files,
+            scanned_files=parsed_result.scanned_files,
+            scanned_directories=parsed_result.scanned_directories,
+            total_errors=parsed_result.total_errors,
+            data_scanned_mb=parsed_result.data_scanned_mb,
+            data_read_mb=parsed_result.data_read_mb,
+            scan_time_seconds=parsed_result.scan_time_seconds,
+            engine_version=parsed_result.engine_version,
+            raw_output=parsed_result.raw_output,
+            error_message=parsed_result.error_message,
+        )
 
     async def _execute_clamscan(
         self, paths: List[str], timeout: int
@@ -122,7 +151,7 @@ class ScanWorker:
             except Exception:
                 pass
             raise
-        except Exception as e:
+        except Exception:
             # Ensure process is killed
             try:
                 process.kill()
@@ -160,13 +189,26 @@ class ScanOrchestrator:
         mem = psutil.virtual_memory()
         available_gb = (mem.available / (1024**3)) - self.config.min_free_memory_gb
         max_by_memory = int(available_gb / self.config.memory_per_process_gb)
-        max_by_cpu = psutil.cpu_count() - 1
+        cpu_count = psutil.cpu_count() or 1
+        max_by_cpu = max(cpu_count - 1, 1)
         
-        if self.config.max_concurrent_processes:
-            return min(max_by_memory, max_by_cpu, self.config.max_concurrent_processes)
-        return max(1, min(max_by_memory, max_by_cpu))
+        base_workers = max_by_memory
+        if max_by_cpu < base_workers:
+            base_workers = max_by_cpu
+        configured = self.config.max_concurrent_processes
+        if configured is not None and configured < base_workers:
+            base_workers = configured
+        if base_workers < 1:
+            base_workers = 1
+        return base_workers
 
-    async def scan_all(self, chunks: List[ScanChunk]) -> List[ScanResult]:
+    async def scan_all(
+        self,
+        chunks: List[ScanChunk],
+        on_result: Optional[
+            Callable[[ScanResult], Optional[Awaitable[None]]]
+        ] = None,
+    ) -> List[ScanResult]:
         """
         Scan all chunks in parallel with concurrency limit.
 
@@ -179,30 +221,45 @@ class ScanOrchestrator:
         self.results = []
         self.failed_chunks = []
         
-        # Create tasks for all chunks
+        # Create tasks for all chunks so we can process results as they complete
         tasks = [
-            self._scan_with_semaphore(chunk)
+            asyncio.create_task(self._scan_with_semaphore(chunk))
             for chunk in chunks
         ]
         
-        # Wait for all tasks to complete
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        async def _handle_callback(result: ScanResult):
+            if on_result is None:
+                return
+            
+            try:
+                callback_result = on_result(result)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            except Exception:
+                # Cancel any in-flight tasks so we don't leak subprocesses
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                raise
         
-        # Process results
-        for result in results:
-            if isinstance(result, Exception):
-                # Create error result
-                error_result = ScanResult(
+        for completed in asyncio.as_completed(tasks):
+            try:
+                result = await completed
+            except Exception as exc:  # noqa: BLE001
+                result = ScanResult(
                     chunk_id="unknown",
                     status="failed",
-                    error_message=str(result),
+                    error_message=str(exc),
                 )
-                self.results.append(error_result)
-                self.failed_chunks.append("unknown")
-            elif result:
-                self.results.append(result)
-                if result.status == "failed":
-                    self.failed_chunks.append(result.chunk_id)
+            
+            if not result:
+                continue
+            
+            self.results.append(result)
+            if result.status == "failed":
+                self.failed_chunks.append(result.chunk_id or "unknown")
+            
+            await _handle_callback(result)
         
         return self.results
 

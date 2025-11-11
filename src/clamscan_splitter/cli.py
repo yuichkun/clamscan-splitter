@@ -5,19 +5,65 @@ import os
 import sys
 import uuid
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional
 
 import click
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
-from clamscan_splitter.chunker import ChunkCreator, ChunkingConfig
+from clamscan_splitter.chunker import ChunkCreator, ChunkingConfig, ScanChunk
 from clamscan_splitter.merger import MergedReport, ResultMerger
 from clamscan_splitter.scanner import ScanConfig, ScanOrchestrator
 from clamscan_splitter.state import ProgressTracker, ScanState, StateManager
 
 
 console = Console()
+
+
+def serialize_chunks(chunks: List[ScanChunk]) -> List[dict]:
+    """Convert ScanChunk objects to JSON-serializable dictionaries."""
+    serialized: List[dict] = []
+    for chunk in chunks:
+        serialized.append(
+            {
+                "id": chunk.id,
+                "paths": list(chunk.paths),
+                "estimated_size_bytes": int(chunk.estimated_size_bytes),
+                "file_count": int(chunk.file_count),
+                "directory_count": int(chunk.directory_count),
+                "created_at": chunk.created_at.isoformat(),
+            }
+        )
+    return serialized
+
+
+def deserialize_chunks(serialized_chunks: List[dict]) -> List[ScanChunk]:
+    """Reconstruct ScanChunk objects from serialized dictionaries."""
+    deserialized: List[ScanChunk] = []
+    for data in serialized_chunks:
+        created_at_raw = data.get("created_at")
+        try:
+            created_at = (
+                datetime.fromisoformat(created_at_raw)
+                if isinstance(created_at_raw, str)
+                else datetime.now()
+            )
+        except ValueError:
+            created_at = datetime.now()
+        
+        deserialized.append(
+            ScanChunk(
+                id=data.get("id", str(uuid.uuid4())),
+                paths=list(data.get("paths", [])),
+                estimated_size_bytes=int(data.get("estimated_size_bytes", 0)),
+                file_count=int(data.get("file_count", 0)),
+                directory_count=int(data.get("directory_count", 0)),
+                created_at=created_at,
+            )
+        )
+    return deserialized
 
 
 @click.group()
@@ -88,18 +134,36 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
             max_files_per_chunk=max_files,
         )
         
-        # Create chunks
         chunker = ChunkCreator()
-        console.print(f"[cyan]Analyzing filesystem: {path}[/cyan]")
-        chunks = chunker.create_chunks(path, chunk_config)
+        serialized_chunks: List[dict] = []
+        
+        if resume:
+            stored_chunks = list(getattr(state, "chunks", []) or [])
+            if stored_chunks:
+                chunks = deserialize_chunks(stored_chunks)
+                serialized_chunks = stored_chunks
+                state.total_chunks = len(chunks)
+                console.print(
+                    f"[cyan]Loaded {len(chunks)} chunks from saved state[/cyan]"
+                )
+            else:
+                console.print(f"[cyan]Analyzing filesystem: {path}[/cyan]")
+                chunks = chunker.create_chunks(path, chunk_config)
+                serialized_chunks = serialize_chunks(chunks)
+                state.total_chunks = len(chunks)
+                state.chunks = serialized_chunks
+                state_manager.save_state(state)
+        else:
+            console.print(f"[cyan]Analyzing filesystem: {path}[/cyan]")
+            chunks = chunker.create_chunks(path, chunk_config)
+            serialized_chunks = serialize_chunks(chunks)
         
         if not chunks:
             console.print("[yellow]No files found to scan[/yellow]")
             return
         
-        console.print(f"[green]Created {len(chunks)} chunks[/green]")
+        console.print(f"[green]Prepared {len(chunks)} chunks[/green]")
         
-        # Create or update state with chunk information
         if not resume:
             # Create new scan state
             scan_id = str(uuid.uuid4())[:8]
@@ -112,6 +176,7 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
                 completed_chunks=[],
                 failed_chunks=[],
                 partial_results=[],
+                chunks=serialized_chunks,
                 configuration={
                     'chunk_size': chunk_size,
                     'max_files': max_files,
@@ -122,10 +187,10 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
             # Save initial state
             state_manager.save_state(state)
         else:
-            # Update existing state if chunk count changed
-            if state.total_chunks != len(chunks):
-                state.total_chunks = len(chunks)
-                state_manager.save_state(state)
+            if not getattr(state, "chunks", []):
+                state.chunks = serialized_chunks
+            state.total_chunks = len(chunks)
+            state_manager.save_state(state)
         
         if dry_run:
             # Show chunk information
@@ -152,51 +217,61 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
         tracker = ProgressTracker(len(chunks))
         
         async def run_scan():
-            results = await orchestrator.scan_all(chunks)
+            status_mapping = {
+                "success": "completed",
+                "partial": "completed",
+                "completed": "completed",
+                "failed": "failed",
+                "timeout": "failed",
+            }
             
-            # Update progress and state
-            for result in results:
-                if result:
-                    tracker.update_chunk_status(result.chunk_id, result.status)
-                    
-                    # Update state
-                    if result.status == "success":
-                        if result.chunk_id not in state.completed_chunks:
-                            state.completed_chunks.append(result.chunk_id)
-                        # Remove from failed if it was there
-                        if result.chunk_id in state.failed_chunks:
-                            state.failed_chunks.remove(result.chunk_id)
-                    elif result.status in ("failed", "timeout"):
-                        if result.chunk_id not in state.failed_chunks:
-                            state.failed_chunks.append(result.chunk_id)
-                        # Remove from completed if it was there
-                        if result.chunk_id in state.completed_chunks:
-                            state.completed_chunks.remove(result.chunk_id)
-                    
-                    # Store result as dict
-                    result_dict = asdict(result)
-                    # Update or append to partial_results
-                    existing_idx = None
-                    for idx, pr in enumerate(state.partial_results):
-                        if pr.get('chunk_id') == result.chunk_id:
-                            existing_idx = idx
-                            break
-                    if existing_idx is not None:
-                        state.partial_results[existing_idx] = result_dict
-                    else:
-                        state.partial_results.append(result_dict)
-                    
-                    # Save state after each chunk
-                    state_manager.save_state(state)
-                    
-                    if result.infected_files:
-                        for infected in result.infected_files:
-                            ui.display_infected_file(
-                                infected.file_path,
-                                infected.virus_name
-                            )
+            async def handle_result(result):
+                chunk_id = result.chunk_id or "unknown"
+                mapped_status = status_mapping.get(result.status, result.status)
+                
+                tracker.update_chunk_status(chunk_id, mapped_status)
+                
+                if mapped_status == "completed":
+                    if chunk_id not in state.completed_chunks:
+                        state.completed_chunks.append(chunk_id)
+                    if chunk_id in state.failed_chunks:
+                        state.failed_chunks.remove(chunk_id)
+                elif mapped_status == "failed":
+                    if chunk_id not in state.failed_chunks:
+                        state.failed_chunks.append(chunk_id)
+                    if chunk_id in state.completed_chunks:
+                        state.completed_chunks.remove(chunk_id)
+                
+                result_dict = asdict(result)
+                existing_idx = None
+                for idx, pr in enumerate(state.partial_results):
+                    if pr.get("chunk_id") == chunk_id:
+                        existing_idx = idx
+                        break
+                if existing_idx is not None:
+                    state.partial_results[existing_idx] = result_dict
+                else:
+                    state.partial_results.append(result_dict)
+                
+                state_manager.save_state(state)
+                
+                ui.update_chunk_progress(
+                    chunk_id,
+                    mapped_status,
+                    tracker.completed,
+                    tracker.failed,
+                    tracker.total_chunks,
+                )
+                
+                if result.infected_files:
+                    for infected in result.infected_files:
+                        ui.display_infected_file(
+                            infected.file_path,
+                            infected.virus_name,
+                        )
             
-            # Merge results
+            results = await orchestrator.scan_all(chunks, on_result=handle_result)
+            
             merger = ResultMerger()
             report = merger.merge_results(results)
             
@@ -323,6 +398,9 @@ class ScanUI:
     def __init__(self):
         """Initialize scan UI."""
         self.console = Console()
+        self.total_chunks: int = 0
+        self.chunk_status: Dict[str, str] = {}
+        self.task_id: Optional[int] = None
         self.progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -336,12 +414,34 @@ class ScanUI:
         """Display scan start information."""
         self.console.print(f"[bold green]Starting scan of: {path}[/bold green]")
         self.console.print(f"[cyan]Total chunks: {chunks}[/cyan]\n")
+        self.total_chunks = chunks
+        self.chunk_status.clear()
         self.progress.start()
+        self.task_id = self.progress.add_task(
+            "Scanning chunks", total=max(chunks, 1)
+        )
 
-    def update_chunk_progress(self, chunk_id: str, status: str):
+    def update_chunk_progress(
+        self,
+        chunk_id: str,
+        status: str,
+        completed: int,
+        failed: int,
+        total: int,
+    ):
         """Update progress display for a chunk."""
-        # Implementation would update progress bar
-        pass
+        if self.task_id is None:
+            return
+
+        self.chunk_status[chunk_id] = status
+        done = min(completed + failed, total)
+        description = f"Completed: {completed} | Failed: {failed}"
+
+        self.progress.update(
+            self.task_id,
+            completed=done,
+            description=description,
+        )
 
     def display_infected_file(self, file_path: str, virus_name: str):
         """Display infected file detection in real-time."""
@@ -352,6 +452,7 @@ class ScanUI:
     def display_final_report(self, report: MergedReport):
         """Display formatted final report."""
         self.progress.stop()
+        self.task_id = None
         self.console.print("\n[bold]Scan Complete![/bold]\n")
         
         merger = ResultMerger()

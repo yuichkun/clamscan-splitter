@@ -1,5 +1,6 @@
 """Tests for the CLI module."""
 
+import inspect
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -11,6 +12,19 @@ from clamscan_splitter.cli import cli, scan, status, list_scans, cleanup
 from clamscan_splitter.merger import MergedReport
 from clamscan_splitter.parser import InfectedFile, ScanResult
 from tests.fixtures.mock_outputs import CLEAN_SCAN_OUTPUT
+
+
+def make_scan_all(results):
+    """Helper to create scan_all coroutine that invokes callbacks."""
+    async def _scan_all(chunks, on_result=None):
+        for result in results:
+            if on_result:
+                callback_result = on_result(result)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+        return results
+
+    return _scan_all
 
 
 class TestCLICommands:
@@ -65,7 +79,7 @@ class TestCLICommands:
             status="success",
             scanned_files=1,
         )
-        mock_orch.scan_all = AsyncMock(return_value=[mock_result])
+        mock_orch.scan_all = make_scan_all([mock_result])
         mock_orchestrator.return_value = mock_orch
         
         runner = CliRunner()
@@ -151,7 +165,7 @@ class TestCLICommands:
             mock_chunker.return_value = mock_chunk_creator
             
             mock_orch_instance = Mock()
-            mock_orch_instance.scan_all = AsyncMock(return_value=[result_obj])
+            mock_orch_instance.scan_all = make_scan_all([result_obj])
             mock_orch_class.return_value = mock_orch_instance
             
             mock_proc = AsyncMock()
@@ -210,7 +224,7 @@ class TestCLICommands:
             mock_chunker.return_value = mock_chunk_creator
             
             mock_orch_instance = Mock()
-            mock_orch_instance.scan_all = AsyncMock(return_value=[result_obj])
+            mock_orch_instance.scan_all = make_scan_all([result_obj])
             mock_orch_class.return_value = mock_orch_instance
             
             mock_proc = AsyncMock()
@@ -335,7 +349,7 @@ class TestCLICommands:
             mock_chunker.return_value = mock_chunk_creator
             
             mock_orch_instance = Mock()
-            mock_orch_instance.scan_all = AsyncMock(return_value=[result_obj])
+            mock_orch_instance.scan_all = make_scan_all([result_obj])
             mock_orch_class.return_value = mock_orch_instance
             
             mock_proc = AsyncMock()
@@ -391,7 +405,7 @@ class TestCLICommands:
             mock_chunker.return_value = mock_chunk_creator
             
             mock_orch_instance = Mock()
-            mock_orch_instance.scan_all = AsyncMock(return_value=[result_obj])
+            mock_orch_instance.scan_all = make_scan_all([result_obj])
             mock_orch_class.return_value = mock_orch_instance
             
             mock_proc = AsyncMock()
@@ -670,7 +684,7 @@ class TestStatePersistence:
                 status="success",
                 scanned_files=1,
             )
-            mock_orch_instance.scan_all = AsyncMock(return_value=[mock_result])
+            mock_orch_instance.scan_all = make_scan_all([mock_result])
             mock_orch_class.return_value = mock_orch_instance
             
             mock_state_manager = Mock()
@@ -687,6 +701,7 @@ class TestStatePersistence:
         assert state.scan_id is not None
         assert state.root_path == str(test_path)
         assert state.total_chunks == 1
+        assert len(state.chunks) == 1
     
     def test_scan_state_appears_in_list(self, tmp_path):
         """Verify that after starting a scan, running list command shows the scan ID."""
@@ -728,7 +743,7 @@ class TestStatePersistence:
                 status="success",
                 scanned_files=1,
             )
-            mock_orch_instance.scan_all = AsyncMock(return_value=[mock_result])
+            mock_orch_instance.scan_all = make_scan_all([mock_result])
             mock_orch_class.return_value = mock_orch_instance
             
             # Run scan
@@ -758,6 +773,72 @@ class TestStatePersistence:
         with patch("clamscan_splitter.cli.StateManager", return_value=state_manager):
             result = runner.invoke(cli, ["list"])
         assert "test-incomplete" in result.output or "No incomplete scans" in result.output
+    
+    def test_resume_uses_persisted_chunks(self, tmp_path):
+        """Ensure resumed scans reuse stored chunk metadata."""
+        from datetime import datetime
+        from clamscan_splitter.state import ScanState
+        
+        test_path = tmp_path / "test_dir"
+        test_path.mkdir()
+        
+        stored_chunk = {
+            "id": "chunk-1",
+            "paths": [str(test_path)],
+            "estimated_size_bytes": 1024,
+            "file_count": 1,
+            "directory_count": 0,
+            "created_at": datetime.now().isoformat(),
+        }
+        
+        state = ScanState(
+            scan_id="resume-id",
+            root_path=str(test_path),
+            total_chunks=1,
+            chunks=[stored_chunk],
+            completed_chunks=[],
+            failed_chunks=[],
+            partial_results=[],
+            start_time=datetime.now(),
+            last_update=datetime.now(),
+            configuration={
+                "chunk_size": 15.0,
+                "max_files": 30000,
+                "workers": None,
+                "timeout_per_gb": 30,
+            },
+        )
+        
+        runner = CliRunner()
+        
+        with patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class:
+            
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = state
+            mock_state_class.return_value = mock_manager
+            
+            mock_chunk_creator = Mock()
+            mock_chunk_creator.create_chunks.side_effect = AssertionError(
+                "ChunkCreator.create_chunks should not be called when chunks are persisted"
+            )
+            mock_chunker.return_value = mock_chunk_creator
+            
+            mock_orch_instance = Mock()
+            mock_result = ScanResult(
+                chunk_id="chunk-1",
+                status="success",
+                scanned_files=1,
+            )
+            mock_orch_instance.scan_all = make_scan_all([mock_result])
+            mock_orch_class.return_value = mock_orch_instance
+            
+            result = runner.invoke(cli, ["scan", "--resume", "resume-id"])
+        
+        assert result.exit_code in [0, 1, 2]  # 2 indicates incomplete scan
+        mock_chunk_creator.create_chunks.assert_not_called()
+        assert state.total_chunks == 1
     
     def test_scan_updates_state_during_execution(self, tmp_path):
         """Verify that state is updated (via save_state) as chunks complete/fail during scan."""
@@ -807,7 +888,7 @@ class TestStatePersistence:
                 status="success",
                 scanned_files=2,
             )
-            mock_orch_instance.scan_all = AsyncMock(return_value=[mock_result1, mock_result2])
+            mock_orch_instance.scan_all = make_scan_all([mock_result1, mock_result2])
             mock_orch_class.return_value = mock_orch_instance
             
             mock_state_manager = Mock()
@@ -863,7 +944,7 @@ class TestStatePersistence:
                 status="success",
                 scanned_files=1,
             )
-            mock_orch_instance.scan_all = AsyncMock(return_value=[mock_result])
+            mock_orch_instance.scan_all = make_scan_all([mock_result])
             mock_orch_class.return_value = mock_orch_instance
             
             # Run scan
@@ -883,6 +964,7 @@ class TestStatePersistence:
         assert loaded_state is not None
         assert loaded_state.root_path == str(test_path)
         assert loaded_state.total_chunks == 1
+        assert len(loaded_state.chunks) == 1
     
     def test_scan_saves_state_on_interrupt(self, tmp_path):
         """Verify that if scan is interrupted (KeyboardInterrupt), state is saved."""
@@ -1036,7 +1118,7 @@ class TestStatePersistence:
                 status="success",
                 scanned_files=1,
             )
-            mock_orch_instance.scan_all = AsyncMock(return_value=[mock_result])
+            mock_orch_instance.scan_all = make_scan_all([mock_result])
             mock_orch_class.return_value = mock_orch_instance
             
             result = runner.invoke(cli, ["scan", "--resume", "resume-test", "--dry-run"])

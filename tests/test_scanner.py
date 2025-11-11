@@ -262,3 +262,52 @@ class TestScanOrchestrator:
         # Should not exceed max_concurrent_processes
         assert max_concurrent[0] <= config.max_concurrent_processes
 
+    @pytest.mark.asyncio
+    async def test_scan_all_invokes_callback_incrementally(self):
+        """Ensure scan_all streams results via callback as chunks finish."""
+        config = ScanConfig(
+            max_concurrent_processes=2,
+            min_timeout_seconds=1,
+        )
+        orchestrator = ScanOrchestrator(config)
+        
+        chunks = [
+            ScanChunk(
+                id="chunk-1",
+                paths=["/test/one"],
+                estimated_size_bytes=1024,
+                file_count=1,
+                directory_count=0,
+                created_at=datetime.now(),
+            ),
+            ScanChunk(
+                id="chunk-2",
+                paths=["/test/two"],
+                estimated_size_bytes=1024,
+                file_count=1,
+                directory_count=0,
+                created_at=datetime.now(),
+            ),
+        ]
+        
+        async def fake_scan(chunk):
+            if chunk.id == "chunk-1":
+                await asyncio.sleep(0.02)
+            else:
+                await asyncio.sleep(0.01)
+            return ScanResult(chunk_id=chunk.id, status="success")
+        
+        orchestrator._scan_with_retry = fake_scan
+        
+        order = []
+        
+        async def on_result(result):
+            order.append(result.chunk_id)
+        
+        results = await orchestrator.scan_all(chunks, on_result=on_result)
+        
+        assert set(order) == {"chunk-1", "chunk-2"}
+        # chunk-2 should complete first due to shorter delay
+        assert order[0] == "chunk-2"
+        assert len(results) == 2
+
