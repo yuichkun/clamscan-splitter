@@ -278,8 +278,8 @@ Remember: Since you can't run actual ClamAV, the tests ARE your validation. Make
 ## Phase 7: Spec Compliance Fixes
 
 ### 7.1 Resume Flow Parity with Spec §3.7 / §3.8
-- [ ] When resuming, skip chunks whose IDs are already in `completed_chunks` instead of re-scanning everything.
-- [ ] Seed `ProgressTracker`/`ScanUI` with counts from `completed_chunks` and `failed_chunks` so the progress bar reflects true resume state.
+- [x] When resuming, skip chunks whose IDs are already in `completed_chunks` instead of re-scanning everything.
+- [x] Seed `ProgressTracker`/`ScanUI` with counts from `completed_chunks` and `failed_chunks` so the progress bar reflects true resume state.
 
 ### 7.2 Hang Detection Integration (Spec §1.3 Key Requirement & §3.5)
 - [ ] Wire `HangDetector`/`ResourceMonitor` into `ScanWorker` so long-running `clamscan` processes are monitored and terminated when CPU/output stalls.
