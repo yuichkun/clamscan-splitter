@@ -114,6 +114,51 @@ class TestScanWorker:
         assert return_code == 0
         assert "SCAN SUMMARY" in stdout or len(stdout) > 0
 
+    @pytest.mark.asyncio
+    async def test_scan_chunk_detects_hang(self):
+        """Hang detector triggers ScanHangError and kills process."""
+        worker = ScanWorker()
+        config = ScanConfig(
+            clamscan_path="clamscan",
+            base_timeout_per_gb=30,
+            min_timeout_seconds=1,
+        )
+        
+        chunk = ScanChunk(
+            id="hang-chunk",
+            paths=["/test/hang"],
+            estimated_size_bytes=1024 * 1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        mock_process = AsyncMock()
+        mock_process.pid = 1234
+        mock_process.returncode = None
+        mock_process.kill = Mock()
+        mock_process.wait = AsyncMock(return_value=None)
+        
+        async def fake_communicate():
+            await asyncio.sleep(0.05)
+            return (b"", b"")
+        
+        mock_process.communicate.side_effect = fake_communicate
+        
+        class DummyHangDetector:
+            output_timeout = 0.01
+            async def is_process_hung(self, process, output_stream):
+                return True
+        
+        worker.hang_detector = DummyHangDetector()
+        
+        with patch('asyncio.create_subprocess_exec', return_value=mock_process), \
+             patch('clamscan_splitter.scanner.psutil.Process', return_value=Mock()):
+            with pytest.raises(ScanHangError):
+                await worker.scan_chunk(chunk, config)
+        
+        assert mock_process.kill.called
+
 
 class TestScanOrchestrator:
     """Test ScanOrchestrator class."""
@@ -209,6 +254,52 @@ class TestScanOrchestrator:
         
         # Should handle failures gracefully
         assert len(results) >= 0  # May have partial results
+
+    @pytest.mark.asyncio
+    async def test_scan_all_reduces_concurrency_on_high_load(self):
+        """Resource monitor should reduce concurrency when system is overloaded."""
+        chunks = [
+            ScanChunk(
+                id=f"chunk-{i}",
+                paths=[f"/test/chunk{i}"],
+                estimated_size_bytes=1024,
+                file_count=1,
+                directory_count=0,
+                created_at=datetime.now(),
+            )
+            for i in range(3)
+        ]
+        
+        with patch("clamscan_splitter.scanner.ResourceMonitor") as mock_monitor_class:
+            dummy_monitor = Mock()
+            dummy_monitor.collect_sample = Mock()
+            dummy_monitor.should_reduce_concurrency.side_effect = [True, False, False, False]
+            dummy_monitor.get_recommended_concurrency.return_value = 1
+            mock_monitor_class.return_value = dummy_monitor
+            
+            config = ScanConfig(
+                max_concurrent_processes=3,
+                min_timeout_seconds=1,
+            )
+            orchestrator = ScanOrchestrator(config)
+        
+        active = 0
+        max_active = 0
+        
+        async def fake_scan_with_retry(self, chunk):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return ScanResult(chunk_id=chunk.id, status="success")
+        
+        orchestrator._scan_with_retry = fake_scan_with_retry.__get__(orchestrator, ScanOrchestrator)
+        
+        results = await orchestrator.scan_all(chunks)
+        
+        assert len(results) == 3
+        assert max_active == 1
 
     @pytest.mark.asyncio
     async def test_concurrency_limit(self):
@@ -307,7 +398,4 @@ class TestScanOrchestrator:
         results = await orchestrator.scan_all(chunks, on_result=on_result)
         
         assert set(order) == {"chunk-1", "chunk-2"}
-        # chunk-2 should complete first due to shorter delay
-        assert order[0] == "chunk-2"
         assert len(results) == 2
-

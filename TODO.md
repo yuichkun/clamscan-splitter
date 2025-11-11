@@ -282,8 +282,8 @@ Remember: Since you can't run actual ClamAV, the tests ARE your validation. Make
 - [x] Seed `ProgressTracker`/`ScanUI` with counts from `completed_chunks` and `failed_chunks` so the progress bar reflects true resume state.
 
 ### 7.2 Hang Detection Integration (Spec §1.3 Key Requirement & §3.5)
-- [ ] Wire `HangDetector`/`ResourceMonitor` into `ScanWorker` so long-running `clamscan` processes are monitored and terminated when CPU/output stalls.
-- [ ] Use `ResourceMonitor.should_reduce_concurrency()` to dynamically back off worker count when the system is overloaded, per configuration.
+- [x] Wire `HangDetector`/`ResourceMonitor` into `ScanWorker` so long-running `clamscan` processes are monitored and terminated when CPU/output stalls.
+- [x] Use `ResourceMonitor.should_reduce_concurrency()` to dynamically back off worker count when the system is overloaded, per configuration.
 
 ### 7.3 Configuration Loader Usage (Spec §6.1–§6.2)
 - [ ] Load defaults via `ConfigLoader` in the CLI, merge with `CLAMSCAN_SPLITTER_CONFIG` file (env override) and CLI flags.

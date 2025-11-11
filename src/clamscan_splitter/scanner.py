@@ -1,15 +1,17 @@
 """Scanner module for managing parallel ClamAV scan execution."""
 
 import asyncio
-import psutil
-from dataclasses import dataclass, field
+import contextlib
 import inspect
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
 
+import psutil
+
 from clamscan_splitter.chunker import ScanChunk
-from clamscan_splitter.monitor import HangDetector
+from clamscan_splitter.monitor import HangDetector, ResourceMonitor
 from clamscan_splitter.parser import ClamAVOutputParser, ScanResult
-from clamscan_splitter.retry import RetryManager, ScanTimeoutError
+from clamscan_splitter.retry import RetryManager, ScanHangError, ScanTimeoutError
 
 
 @dataclass
@@ -63,6 +65,8 @@ class ScanWorker:
         
         except asyncio.TimeoutError:
             raise ScanTimeoutError(f"Scan exceeded timeout of {timeout} seconds")
+        except ScanHangError:
+            raise
         except Exception as e:
             # Check if it's a hang error
             error_name = type(e).__name__
@@ -129,13 +133,23 @@ class ScanWorker:
             stderr=asyncio.subprocess.PIPE,
         )
         
+        communicate_task = asyncio.create_task(process.communicate())
+        hang_monitor_task = asyncio.create_task(self._monitor_for_hang(process))
+        
         try:
-            # Wait for completion with timeout
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+            done, _ = await asyncio.wait(
+                {communicate_task, hang_monitor_task},
                 timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
             )
             
+            if hang_monitor_task in done and not hang_monitor_task.cancelled():
+                hang_monitor_task.result()
+            
+            if communicate_task not in done:
+                raise asyncio.TimeoutError
+            
+            stdout, stderr = await communicate_task
             return_code = process.returncode
             
             return (
@@ -144,21 +158,52 @@ class ScanWorker:
                 return_code if return_code is not None else 0,
             )
         except asyncio.TimeoutError:
-            # Kill process on timeout
-            try:
-                process.kill()
-                await process.wait()
-            except Exception:
-                pass
+            await self._stop_process(process)
+            raise
+        except ScanHangError:
             raise
         except Exception:
-            # Ensure process is killed
-            try:
-                process.kill()
-                await process.wait()
-            except Exception:
-                pass
+            await self._stop_process(process)
             raise
+        finally:
+            hang_monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await hang_monitor_task
+
+    async def _monitor_for_hang(self, process: asyncio.subprocess.Process):
+        """Monitor process using HangDetector and raise when hung."""
+        pid = getattr(process, "pid", None)
+        if pid is None:
+            return
+        
+        try:
+            ps_process = psutil.Process(int(pid))
+        except (TypeError, ValueError, psutil.NoSuchProcess, psutil.AccessDenied):
+            return
+        
+        poll_interval = max(0.5, self.hang_detector.output_timeout / 5)
+        
+        while True:
+            if process.returncode is not None:
+                return
+            
+            hung = await self.hang_detector.is_process_hung(ps_process, None)
+            if hung:
+                await self._stop_process(process)
+                raise ScanHangError("Scan process appears hung")
+            
+            await asyncio.sleep(poll_interval)
+
+    async def _stop_process(self, process: asyncio.subprocess.Process):
+        """Terminate and await the given subprocess."""
+        try:
+            kill_result = process.kill()
+            if inspect.isawaitable(kill_result):
+                await kill_result
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            await process.wait()
 
 
 class ScanOrchestrator:
@@ -178,6 +223,9 @@ class ScanOrchestrator:
         self.quarantined_files: List[str] = []
         self.worker = ScanWorker()
         self.retry_manager = RetryManager()
+        self.resource_monitor = ResourceMonitor()
+        self.current_worker_limit = self.max_workers
+        self._borrowed_tokens = 0
 
     def _calculate_max_workers(self) -> int:
         """
@@ -261,10 +309,16 @@ class ScanOrchestrator:
             
             await _handle_callback(result)
         
+        # Release any borrowed tokens used to throttle concurrency
+        for _ in range(self._borrowed_tokens):
+            self.semaphore.release()
+        self._borrowed_tokens = 0
+        
         return self.results
 
     async def _scan_with_semaphore(self, chunk: ScanChunk) -> Optional[ScanResult]:
         """Scan chunk with semaphore for concurrency control."""
+        await self._maybe_adjust_concurrency()
         async with self.semaphore:
             return await self._scan_with_retry(chunk)
 
@@ -301,3 +355,27 @@ class ScanOrchestrator:
                 status="failed",
                 error_message=str(e),
             )
+
+    async def _maybe_adjust_concurrency(self):
+        """Collect resource samples and reduce concurrency if required."""
+        try:
+            self.resource_monitor.collect_sample()
+        except Exception:
+            return
+        
+        if not self.resource_monitor.should_reduce_concurrency():
+            return
+        
+        recommended = self.resource_monitor.get_recommended_concurrency()
+        if recommended <= 0:
+            recommended = 1
+        
+        new_limit = max(1, min(self.max_workers, recommended))
+        if new_limit >= self.current_worker_limit:
+            return
+        
+        tokens_to_acquire = self.current_worker_limit - new_limit
+        for _ in range(tokens_to_acquire):
+            await self.semaphore.acquire()
+            self._borrowed_tokens += 1
+        self.current_worker_limit = new_limit
