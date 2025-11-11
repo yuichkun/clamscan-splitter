@@ -181,6 +181,82 @@ class TestCLICommands:
         # Should complete successfully
         assert result.exit_code in [0, 1, 2]  # 0=success, 1=infections, 2=incomplete
 
+    def test_scan_command_stores_last_summary(self, tmp_path):
+        """Final report summary should be persisted in scan state."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        test_path = tmp_path / "summary_dir"
+        test_path.mkdir()
+        
+        runner = CliRunner()
+        
+        chunk = ScanChunk(
+            id="chunk-1",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        summary_holder = {}
+        
+        mock_result = ScanResult(
+            chunk_id="chunk-1",
+            status="success",
+            scanned_files=1,
+        )
+        
+        with patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
+             patch("clamscan_splitter.cli.ResultMerger") as mock_merger_class:
+            
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = None
+            def save_state_side_effect(state):
+                summary_holder["value"] = getattr(state, "last_report_summary", None)
+            mock_manager.save_state.side_effect = save_state_side_effect
+            mock_state_class.return_value = mock_manager
+            
+            mock_chunk_creator = Mock()
+            mock_chunk_creator.create_chunks.return_value = [chunk]
+            mock_chunker.return_value = mock_chunk_creator
+            
+            mock_orch_instance = Mock()
+            mock_orch_instance.scan_all = make_scan_all([mock_result])
+            mock_orch_class.return_value = mock_orch_instance
+            
+            mock_report = MergedReport(
+                total_scanned_files=1,
+                total_scanned_directories=0,
+                total_infected_files=0,
+                infected_file_paths=[],
+                total_errors=0,
+                total_data_scanned_mb=1.0,
+                total_data_read_mb=1.0,
+                total_time_seconds=1.0,
+                wall_clock_time_seconds=1.0,
+                engine_version="1.4.3",
+                chunks_successful=1,
+                chunks_failed=0,
+                chunks_partial=0,
+                scan_complete=True,
+            )
+            
+            mock_merger = Mock()
+            mock_merger.merge_results.return_value = mock_report
+            mock_merger.format_report.return_value = "FINAL SUMMARY"
+            mock_merger.save_detailed_report = Mock()
+            mock_merger.save_quarantine_report = Mock()
+            mock_merger_class.return_value = mock_merger
+            
+            result = runner.invoke(cli, ["scan", str(test_path)])
+        
+        assert result.exit_code in (0, 1, 2)
+        assert summary_holder.get("value") == "FINAL SUMMARY"
+
     def test_scan_command_with_infections(self, tmp_path):
         """Test scan command when infections are found."""
         test_path = tmp_path / "test_dir"
@@ -1087,6 +1163,36 @@ class TestCLICommands:
         
         assert result.exit_code == 0
         assert "test-scan" in result.output
+
+    def test_status_command_displays_last_summary(self, tmp_path):
+        """Status output should include saved report summary when available."""
+        runner = CliRunner()
+        
+        from clamscan_splitter.state import ScanState
+        from datetime import datetime
+        
+        state = ScanState(
+            scan_id="test-scan",
+            root_path=str(tmp_path),
+            total_chunks=2,
+            completed_chunks=["chunk-1"],
+            failed_chunks=[],
+            partial_results=[],
+            start_time=datetime.now(),
+            last_update=datetime.now(),
+            configuration={},
+        )
+        state.last_report_summary = "SAVED SUMMARY"
+        
+        with patch("clamscan_splitter.cli.StateManager") as mock_state:
+            mock_manager = Mock()
+            mock_manager.load_state.return_value = state
+            mock_state.return_value = mock_manager
+            
+            result = runner.invoke(cli, ["status", "test-scan"])
+        
+        assert result.exit_code == 0
+        assert "SAVED SUMMARY" in result.output
 
     def test_cleanup_command(self):
         """Test cleanup command."""

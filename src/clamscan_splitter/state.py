@@ -25,6 +25,7 @@ class ScanState:
     start_time: datetime = field(default_factory=datetime.now)  # When scan started
     last_update: datetime = field(default_factory=datetime.now)  # Last state update
     configuration: dict = field(default_factory=dict)  # Scan configuration used
+    last_report_summary: Optional[str] = None  # Last formatted report
 
 
 class StateManager:

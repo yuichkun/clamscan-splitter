@@ -464,6 +464,7 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
         ui.display_final_report(report)
         
         merger_for_output = ResultMerger()
+        formatted_summary = merger_for_output.format_report(report)
         if report.quarantined_files:
             merger_for_output.save_quarantine_report(report)
         
@@ -472,9 +473,8 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
             if json:
                 merger_for_output.save_detailed_report(report, output)
             else:
-                formatted = merger_for_output.format_report(report)
                 with open(output, 'w') as f:
-                    f.write(formatted)
+                    f.write(formatted_summary)
             console.print(f"[green]Report saved to: {output}[/green]")
         elif json:
             # Output JSON to stdout
@@ -488,6 +488,13 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
                 "chunks_failed": report.chunks_failed,
             }
             console.print(json_module.dumps(report_dict, indent=2))
+        
+        if state:
+            state.last_report_summary = formatted_summary
+            try:
+                state_manager.save_state(state)
+            except Exception:
+                console.print("[yellow]Warning: Failed to persist last report summary[/yellow]")
         
         # Exit with appropriate code
         if report.total_infected_files > 0:
@@ -563,6 +570,10 @@ def status(scan_id):
     console.print(f"Progress: {percentage:.1f}%")
     console.print(f"Started: {state.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     console.print(f"Last update: {state.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    if getattr(state, "last_report_summary", None):
+        console.print("\n[bold]Last Report Summary:[/bold]\n")
+        console.print(state.last_report_summary)
 
 
 @cli.command()
