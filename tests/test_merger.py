@@ -346,6 +346,54 @@ class TestResultMerger:
         assert "QUARANTINE SUMMARY" in formatted
         assert "2" in formatted  # Quarantine count
 
+    def test_merge_results_includes_quarantine_entries(self):
+        """Quarantine entries should be preserved in merged report."""
+        merger = ResultMerger()
+        quarantine_entry = QuarantineEntry(
+            file_path="/quarantine/file",
+            reason="timeout",
+        )
+        results = [
+            ScanResult(
+                chunk_id="chunk-1",
+                status="failed",
+                scanned_files=0,
+                scanned_directories=0,
+                total_errors=1,
+            )
+        ]
+        
+        report = merger.merge_results(results, quarantined_entries=[quarantine_entry])
+        
+        assert len(report.quarantined_files) == 1
+        assert report.quarantined_files[0].file_path == "/quarantine/file"
+
+    def test_save_quarantine_report(self, tmp_path):
+        """Ensure quarantine report JSON is written to disk."""
+        merger = ResultMerger()
+        entry = QuarantineEntry(file_path="/tmp/file", reason="timeout")
+        report = MergedReport(
+            total_scanned_files=0,
+            total_scanned_directories=0,
+            total_infected_files=0,
+            infected_file_paths=[],
+            total_errors=0,
+            total_data_scanned_mb=0.0,
+            total_data_read_mb=0.0,
+            total_time_seconds=0.0,
+            wall_clock_time_seconds=0.0,
+            engine_version="",
+            chunks_successful=0,
+            chunks_failed=0,
+            chunks_partial=0,
+            quarantined_files=[entry],
+        )
+        
+        output_path = tmp_path / "quarantine.json"
+        merger.save_quarantine_report(report, path=str(output_path))
+        
+        assert output_path.exists()
+
     def test_save_detailed_report(self, tmp_path):
         """Test saving detailed JSON report."""
         merger = ResultMerger()
@@ -380,4 +428,3 @@ class TestResultMerger:
         with open(report_path) as f:
             data = json.load(f)
             assert data["total_scanned_files"] == 1000
-

@@ -290,8 +290,8 @@ Remember: Since you can't run actual ClamAV, the tests ARE your validation. Make
 - [x] Support documented environment overrides (`CLAMSCAN_SPLITTER_WORKERS`, `CLAMSCAN_SPLITTER_CHUNK_SIZE`, etc.) so users can control behavior without flags.
 
 ### 7.4 Quarantine Reporting (Spec §3.6 & §3.3 Summary Format)
-- [ ] Plumb `RetryManager.quarantine_list` into `ResultMerger` so quarantined paths populate `MergedReport.quarantined_files`.
-- [ ] Actually emit the `quarantine_report.json` file referenced in `format_report` whenever quarantined files exist.
+- [x] Plumb `RetryManager.quarantine_list` into `ResultMerger` so quarantined paths populate `MergedReport.quarantined_files`.
+- [x] Actually emit the `quarantine_report.json` file referenced in `format_report` whenever quarantined files exist.
 
 ### 7.5 Circuit Breaker Usage (Spec §3.4)
 - [ ] Integrate the `CircuitBreaker` with the retry/orchestrator pipeline so paths that repeatedly fail are skipped/quarantined according to the spec.

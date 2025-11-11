@@ -16,7 +16,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 
 from clamscan_splitter.chunker import ChunkCreator, ChunkingConfig, ScanChunk
 from clamscan_splitter.config import ConfigLoader
-from clamscan_splitter.merger import MergedReport, ResultMerger
+from clamscan_splitter.merger import MergedReport, QuarantineEntry, ResultMerger
 from clamscan_splitter.parser import InfectedFile, ScanResult
 from clamscan_splitter.scanner import ScanConfig, ScanOrchestrator
 from clamscan_splitter.state import ProgressTracker, ScanState, StateManager
@@ -415,36 +415,70 @@ def scan(path, chunk_size, max_files, workers, timeout_per_gb,
             
             results = await orchestrator.scan_all(chunks_to_scan, on_result=handle_result)
             
+            raw_quarantines = getattr(orchestrator, "quarantined_files", [])
+            if not isinstance(raw_quarantines, list):
+                raw_quarantines = []
+            
+            quarantine_entries: List[QuarantineEntry] = []
+            for entry in raw_quarantines:
+                if isinstance(entry, QuarantineEntry):
+                    quarantine_entries.append(entry)
+                    continue
+                if isinstance(entry, dict):
+                    last_attempt = entry.get("last_attempt")
+                    if isinstance(last_attempt, str):
+                        try:
+                            last_attempt = datetime.fromisoformat(last_attempt)
+                        except ValueError:
+                            last_attempt = datetime.now()
+                    elif not isinstance(last_attempt, datetime):
+                        last_attempt = datetime.now()
+                    quarantine_entries.append(
+                        QuarantineEntry(
+                            file_path=entry.get("file_path", ""),
+                            reason=entry.get("reason", "quarantine"),
+                            file_size_bytes=entry.get("file_size_bytes"),
+                            retry_count=int(entry.get("retry_count", 0) or 0),
+                            last_attempt=last_attempt,
+                        )
+                    )
+            
             merger = ResultMerger()
             combined_results = list(existing_completed_results) + list(results)
-            report = merger.merge_results(combined_results)
+            report = merger.merge_results(combined_results, quarantined_entries=quarantine_entries)
             
-            return report
+            return report, quarantine_entries
 
         if chunks_to_scan:
             # Execute scan for pending chunks
-            report = asyncio.run(run_scan())
+            report, quarantine_entries = asyncio.run(run_scan())
         else:
             merger = ResultMerger()
-            report = merger.merge_results(existing_completed_results)
+            quarantine_entries: List[QuarantineEntry] = []
+            report = merger.merge_results(
+                existing_completed_results,
+                quarantined_entries=quarantine_entries,
+            )
         
         # Display final report
         ui.display_final_report(report)
         
+        merger_for_output = ResultMerger()
+        if report.quarantined_files:
+            merger_for_output.save_quarantine_report(report)
+        
         # Save report if requested
         if output:
             if json:
-                merger = ResultMerger()
-                merger.save_detailed_report(report, output)
+                merger_for_output.save_detailed_report(report, output)
             else:
-                formatted = merger.format_report(report)
+                formatted = merger_for_output.format_report(report)
                 with open(output, 'w') as f:
                     f.write(formatted)
             console.print(f"[green]Report saved to: {output}[/green]")
         elif json:
             # Output JSON to stdout
             import json as json_module
-            merger = ResultMerger()
             report_dict = {
                 "total_scanned_files": report.total_scanned_files,
                 "total_infected_files": report.total_infected_files,

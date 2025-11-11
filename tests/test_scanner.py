@@ -8,7 +8,7 @@ import pytest
 
 from clamscan_splitter.chunker import ScanChunk
 from clamscan_splitter.parser import ScanResult
-from clamscan_splitter.retry import ScanHangError, ScanTimeoutError
+from clamscan_splitter.retry import RetryManager, ScanHangError, ScanTimeoutError
 from clamscan_splitter.scanner import ScanConfig, ScanOrchestrator, ScanWorker
 from tests.fixtures.mock_outputs import CLEAN_SCAN_OUTPUT, INFECTED_SCAN_OUTPUT
 
@@ -300,6 +300,49 @@ class TestScanOrchestrator:
         
         assert len(results) == 3
         assert max_active == 1
+
+    @pytest.mark.asyncio
+    async def test_scan_all_collects_quarantined_entries(self):
+        """Orchestrator should expose quarantined file metadata."""
+        from clamscan_splitter.retry import RetryManager
+        
+        config = ScanConfig(
+            max_concurrent_processes=1,
+            min_timeout_seconds=1,
+        )
+        orchestrator = ScanOrchestrator(config)
+        
+        chunks = [
+            ScanChunk(
+                id="chunk-q",
+                paths=["/test/q"],
+                estimated_size_bytes=1024,
+                file_count=1,
+                directory_count=0,
+                created_at=datetime.now(),
+            )
+        ]
+        
+        async def fake_scan(self_ref, chunk, scanner, retry_config, scan_config):
+            self_ref.quarantine_list.append(
+                {
+                    "file_path": "/quarantine/file",
+                    "reason": "timeout",
+                    "retry_count": 1,
+                    "last_attempt": datetime.now(),
+                }
+            )
+            return ScanResult(chunk_id=chunk.id, status="failed")
+        
+        orchestrator.retry_manager.scan_with_retry = fake_scan.__get__(
+            orchestrator.retry_manager,
+            RetryManager,
+        )
+        
+        await orchestrator.scan_all(chunks)
+        
+        assert len(orchestrator.quarantined_files) == 1
+        assert orchestrator.quarantined_files[0]["file_path"] == "/quarantine/file"
 
     @pytest.mark.asyncio
     async def test_concurrency_limit(self):

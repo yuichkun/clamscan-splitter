@@ -42,7 +42,7 @@ class RetryManager:
     def __init__(self):
         """Initialize retry manager."""
         self.file_retry_counts: defaultdict[str, int] = defaultdict(int)
-        self.quarantine_list: List[str] = []
+        self.quarantine_list: List[dict] = []
 
     async def scan_with_retry(
         self,
@@ -75,8 +75,9 @@ class RetryManager:
             try:
                 files_to_skip = self._get_files_to_skip(chunk, retry_config)
                 if files_to_skip:
+                    for path in files_to_skip:
+                        self._record_quarantine_entry(path, "retry_limit")
                     chunk = self._exclude_files_from_chunk(chunk, files_to_skip)
-                    self.quarantine_list.extend(files_to_skip)
 
                 result = await scanner.scan_chunk(chunk, scan_config)
                 result.chunk_id = orig_id
@@ -328,8 +329,9 @@ class RetryManager:
 
     def _create_quarantine_result(self, chunk: ScanChunk, error: Exception) -> ScanResult:
         """Create result indicating quarantine."""
-        # Add all paths to quarantine
-        self.quarantine_list.extend(chunk.paths)
+        reason = self._reason_from_error(error)
+        for path in chunk.paths:
+            self._record_quarantine_entry(path, reason)
         
         return ScanResult(
             chunk_id=chunk.id,
@@ -345,6 +347,36 @@ class RetryManager:
             raw_output="",
             error_message=f"Quarantined: {str(error)}",
         )
+
+    def _record_quarantine_entry(
+        self,
+        path: str,
+        reason: str,
+        file_size_bytes: Optional[int] = None,
+    ):
+        """Record metadata for a quarantined path."""
+        self.quarantine_list.append(
+            {
+                "file_path": path,
+                "reason": reason,
+                "file_size_bytes": file_size_bytes,
+                "retry_count": self.file_retry_counts.get(path, 0),
+                "last_attempt": datetime.now(),
+            }
+        )
+
+    def _reason_from_error(self, error: Exception) -> str:
+        """Map exception types to human-readable quarantine reasons."""
+        if isinstance(error, ScanTimeoutError):
+            return "timeout"
+        if isinstance(error, ScanHangError):
+            return "hang"
+        name = type(error).__name__.lower()
+        if "timeout" in name:
+            return "timeout"
+        if "hang" in name:
+            return "hang"
+        return name
 
 
 class CircuitBreaker:

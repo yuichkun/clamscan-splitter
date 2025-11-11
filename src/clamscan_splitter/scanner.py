@@ -220,7 +220,7 @@ class ScanOrchestrator:
         self.semaphore = asyncio.Semaphore(self.max_workers)
         self.results: List[ScanResult] = []
         self.failed_chunks: List[str] = []
-        self.quarantined_files: List[str] = []
+        self.quarantined_files: List[dict] = []
         self.worker = ScanWorker()
         self.retry_manager = RetryManager()
         self.resource_monitor = ResourceMonitor()
@@ -268,6 +268,7 @@ class ScanOrchestrator:
         """
         self.results = []
         self.failed_chunks = []
+        self.retry_manager.quarantine_list = []
         
         # Create tasks for all chunks so we can process results as they complete
         tasks = [
@@ -313,6 +314,7 @@ class ScanOrchestrator:
         for _ in range(self._borrowed_tokens):
             self.semaphore.release()
         self._borrowed_tokens = 0
+        self.quarantined_files = list(self.retry_manager.quarantine_list)
         
         return self.results
 

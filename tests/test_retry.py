@@ -269,6 +269,24 @@ class TestRetryManager:
         # Should identify large files
         assert len(skip_list) >= 0  # May or may not skip based on implementation
 
+    def test_quarantine_entries_record_reason(self):
+        """Quarantine list should capture reason metadata."""
+        manager = RetryManager()
+        chunk = ScanChunk(
+            id="chunk-q",
+            paths=["/tmp/file1", "/tmp/file2"],
+            estimated_size_bytes=2048,
+            file_count=2,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        manager._create_quarantine_result(chunk, ScanTimeoutError("Timeout"))
+        
+        assert len(manager.quarantine_list) == 2
+        assert manager.quarantine_list[0]["file_path"] == "/tmp/file1"
+        assert manager.quarantine_list[0]["reason"] == "timeout"
+
 
 class TestCircuitBreaker:
     """Test CircuitBreaker class."""
@@ -324,4 +342,3 @@ class ScanTimeoutError(Exception):
 class ScanHangError(Exception):
     """Scan process appears hung."""
     pass
-

@@ -12,7 +12,7 @@ from click.testing import CliRunner
 from typing import List
 
 from clamscan_splitter.cli import cli, scan, status, list_scans, cleanup
-from clamscan_splitter.merger import MergedReport
+from clamscan_splitter.merger import MergedReport, QuarantineEntry, ResultMerger
 from clamscan_splitter.parser import InfectedFile, ScanResult
 from tests.fixtures.mock_outputs import CLEAN_SCAN_OUTPUT
 
@@ -478,30 +478,6 @@ class TestCLICommands:
                     await callback_result
             return [pending_result]
         
-        merge_call_args = {}
-        
-        def merge_results(results):
-            merge_call_args["ids"] = [r.chunk_id for r in results]
-            merge_call_args["count"] = len(results)
-            return MergedReport(
-                total_scanned_files=0,
-                total_scanned_directories=0,
-                total_infected_files=0,
-                infected_file_paths=[],
-                total_errors=0,
-                total_data_scanned_mb=0.0,
-                total_data_read_mb=0.0,
-                total_time_seconds=0.0,
-                wall_clock_time_seconds=0.0,
-                engine_version="",
-                chunks_successful=0,
-                chunks_failed=0,
-                chunks_partial=0,
-                skipped_paths=[],
-                quarantined_files=[],
-                scan_complete=True,
-            )
-        
         with patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
              patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
              patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker, \
@@ -520,7 +496,24 @@ class TestCLICommands:
             mock_orch_class.return_value = mock_orch_instance
             
             mock_merger = Mock()
-            mock_merger.merge_results.side_effect = merge_results
+            mock_merger.merge_results.return_value = MergedReport(
+                total_scanned_files=0,
+                total_scanned_directories=0,
+                total_infected_files=0,
+                infected_file_paths=[],
+                total_errors=0,
+                total_data_scanned_mb=0.0,
+                total_data_read_mb=0.0,
+                total_time_seconds=0.0,
+                wall_clock_time_seconds=0.0,
+                engine_version="",
+                chunks_successful=0,
+                chunks_failed=0,
+                chunks_partial=0,
+                skipped_paths=[],
+                quarantined_files=[],
+                scan_complete=True,
+            )
             mock_merger.format_report.return_value = "report"
             mock_merger.save_detailed_report = Mock()
             mock_merger_class.return_value = mock_merger
@@ -528,8 +521,10 @@ class TestCLICommands:
             result = runner.invoke(cli, ["scan", "--resume", "resume-merge"])
         
         assert result.exit_code in [0, 1]
-        assert merge_call_args.get("count") == 2
-        assert set(merge_call_args.get("ids", [])) == {"chunk-1", "chunk-2"}
+        merge_call = mock_merger.merge_results.call_args
+        combined_results = merge_call.args[0]
+        assert len(combined_results) == 2
+        assert {res.chunk_id for res in combined_results} == {"chunk-1", "chunk-2"}
 
     def test_scan_command_resume_without_path_argument(self, tmp_path):
         """Resuming should not require the PATH argument."""
@@ -785,6 +780,100 @@ class TestCLICommands:
         
         assert result.exit_code == 0
         assert captured_cfg["target_size"] == 12.0
+
+    def test_scan_command_generates_quarantine_report(self, tmp_path):
+        """Quarantined files should trigger report saving."""
+        from clamscan_splitter.chunker import ScanChunk
+        from datetime import datetime
+        
+        runner = CliRunner()
+        test_path = tmp_path / "quarantine_dir"
+        test_path.mkdir()
+        (test_path / "dummy.txt").write_text("data")
+        
+        chunk = ScanChunk(
+            id="chunk-q",
+            paths=[str(test_path)],
+            estimated_size_bytes=1024,
+            file_count=1,
+            directory_count=0,
+            created_at=datetime.now(),
+        )
+        
+        scan_result = ScanResult(
+            chunk_id="chunk-q",
+            status="failed",
+        )
+        
+        quarantine_dict = {
+            "file_path": "/quarantine/file",
+            "reason": "timeout",
+            "retry_count": 1,
+            "last_attempt": datetime.now(),
+        }
+        
+        with patch("clamscan_splitter.cli.ConfigLoader") as mock_loader_class, \
+             patch("clamscan_splitter.cli.StateManager") as mock_state_class, \
+             patch("clamscan_splitter.cli.ChunkCreator") as mock_chunker_class, \
+             patch("clamscan_splitter.cli.ScanOrchestrator") as mock_orch_class, \
+             patch("clamscan_splitter.cli.ResultMerger") as mock_merger_class, \
+             patch("clamscan_splitter.cli.ScanUI") as mock_ui_class:
+            
+            mock_loader = Mock()
+            mock_loader.load_default_config.return_value = {"chunking": {}, "scanning": {}}
+            mock_loader_class.return_value = mock_loader
+            
+            mock_chunker = Mock()
+            mock_chunker.create_chunks.return_value = [chunk]
+            mock_chunker_class.return_value = mock_chunker
+            
+            mock_state_manager = Mock()
+            mock_state_manager.load_state.return_value = None
+            mock_state_manager.save_state = Mock()
+            mock_state_class.return_value = mock_state_manager
+            
+            mock_orch_instance = Mock()
+            mock_orch_instance.scan_all = make_scan_all([scan_result])
+            mock_orch_instance.quarantined_files = [quarantine_dict]
+            mock_orch_class.return_value = mock_orch_instance
+            
+            mock_report = MergedReport(
+                total_scanned_files=0,
+                total_scanned_directories=0,
+                total_infected_files=0,
+                infected_file_paths=[],
+                total_errors=0,
+                total_data_scanned_mb=0.0,
+                total_data_read_mb=0.0,
+                total_time_seconds=0.0,
+                wall_clock_time_seconds=0.0,
+                engine_version="",
+                chunks_successful=0,
+                chunks_failed=0,
+                chunks_partial=0,
+                quarantined_files=[
+                    QuarantineEntry(file_path="/quarantine/file", reason="timeout")
+                ],
+                scan_complete=False,
+            )
+            
+            mock_merger = Mock()
+            mock_merger.merge_results.return_value = mock_report
+            mock_merger.format_report.return_value = "report"
+            mock_merger.save_detailed_report = Mock()
+            mock_merger.save_quarantine_report = Mock()
+            mock_merger_class.return_value = mock_merger
+            
+            mock_ui_instance = Mock()
+            mock_ui_class.return_value = mock_ui_instance
+            
+            result = runner.invoke(cli, ["scan", str(test_path)])
+        
+        assert result.exit_code in (0, 1, 2)
+        merge_kwargs = mock_merger.merge_results.call_args.kwargs
+        assert "quarantined_entries" in merge_kwargs
+        assert len(merge_kwargs["quarantined_entries"]) == 1
+        mock_merger.save_quarantine_report.assert_called_once()
 
     def test_scan_command_no_files(self, tmp_path):
         """Test scan command when no files found."""
